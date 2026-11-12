@@ -1,0 +1,273 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, system-ui, sans-serif;
+    user-select: none;
+  }
+
+  html,
+  body,
+  #root {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #0e171d;
+    color: #ecf2f6;
+    font-variant-numeric: tabular-nums;
+  }
+
+  input,
+  select,
+  textarea {
+    user-select: text;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Crisp tabular numbers utility */
+.ttd-num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Classic Transport Tycoon Deluxe 3D Beveled Window Frame */
+.ttd-window {
+  background: linear-gradient(180deg, #32404b 0%, #28343d 100%);
+  border-top: 2px solid #6d8496;
+  border-left: 2px solid #6d8496;
+  border-right: 2px solid #13191e;
+  border-bottom: 2px solid #13191e;
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.65),
+    inset 1px 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+/* Titlebar themes inspired by classic TTD company/window headers */
+.ttd-titlebar-teal {
+  background: linear-gradient(180deg, #1b5e63 0%, #113f43 100%);
+  border-bottom: 2px solid #0b2629;
+  box-shadow: inset 0 1px 0 rgba(167, 243, 208, 0.28);
+}
+
+.ttd-titlebar-brass {
+  background: linear-gradient(180deg, #8a6421 0%, #5c4011 100%);
+  border-bottom: 2px solid #332207;
+  box-shadow: inset 0 1px 0 rgba(253, 230, 138, 0.35);
+}
+
+.ttd-titlebar-slate {
+  background: linear-gradient(180deg, #435463 0%, #2b3742 100%);
+  border-bottom: 2px solid #161d24;
+  box-shadow: inset 0 1px 0 rgba(226, 232, 240, 0.25);
+}
+
+.ttd-titlebar-purple {
+  background: linear-gradient(180deg, #58356e 0%, #39204a 100%);
+  border-bottom: 2px solid #1f1029;
+  box-shadow: inset 0 1px 0 rgba(233, 213, 255, 0.28);
+}
+
+.ttd-titlebar-crimson {
+  background: linear-gradient(180deg, #7c2d2d 0%, #521b1b 100%);
+  border-bottom: 2px solid #2b0d0d;
+  box-shadow: inset 0 1px 0 rgba(254, 202, 202, 0.28);
+}
+
+/* Raised panel inside a window */
+.ttd-panel {
+  background: #2f3c47;
+  border-top: 1.5px solid #5c7182;
+  border-left: 1.5px solid #5c7182;
+  border-right: 1.5px solid #161e24;
+  border-bottom: 1.5px solid #161e24;
+}
+
+/* Sunken/inset data well (tables, ledgers, inputs) */
+.ttd-inset {
+  background: #172027;
+  border-top: 1.5px solid #0d1317;
+  border-left: 1.5px solid #0d1317;
+  border-right: 1.5px solid #4c5f6e;
+  border-bottom: 1.5px solid #4c5f6e;
+}
+
+/* Tactile 3D-bevel TTD button */
+.ttd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  background: linear-gradient(180deg, #465866 0%, #33424e 100%);
+  color: #f1f5f9;
+  border-top: 2px solid #7c93a6;
+  border-left: 2px solid #7c93a6;
+  border-right: 2px solid #161d23;
+  border-bottom: 2px solid #161d23;
+  font-weight: 600;
+  font-size: 0.75rem;
+  line-height: 1.1;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  transition: filter 80ms ease;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.65);
+}
+
+.ttd-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.ttd-btn:active:not(:disabled),
+.ttd-btn-active {
+  background: linear-gradient(180deg, #1e2930 0%, #2a3842 100%) !important;
+  border-top: 2px solid #11171c !important;
+  border-left: 2px solid #11171c !important;
+  border-right: 2px solid #647b8c !important;
+  border-bottom: 2px solid #647b8c !important;
+  color: #fde047 !important;
+  transform: translate(0.5px, 0.5px);
+}
+
+.ttd-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ttd-btn-brass {
+  background: linear-gradient(180deg, #a17425 0%, #785315 100%);
+  border-top-color: #eab308;
+  border-left-color: #eab308;
+  border-right-color: #3b2707;
+  border-bottom-color: #3b2707;
+  color: #fefce8;
+}
+
+.ttd-btn-green {
+  background: linear-gradient(180deg, #1f7a4c 0%, #155735 100%);
+  border-top-color: #4ade80;
+  border-left-color: #4ade80;
+  border-right-color: #092918;
+  border-bottom-color: #092918;
+  color: #ecfdf5;
+}
+
+.ttd-btn-red {
+  background: linear-gradient(180deg, #992f2f 0%, #6e1e1e 100%);
+  border-top-color: #f87171;
+  border-left-color: #f87171;
+  border-right-color: #380c0c;
+  border-bottom-color: #380c0c;
+  color: #fef2f2;
+}
+
+.ttd-btn-teal {
+  background: linear-gradient(180deg, #1d6f75 0%, #134e52 100%);
+  border-top-color: #5eead4;
+  border-left-color: #5eead4;
+  border-right-color: #082729;
+  border-bottom-color: #082729;
+  color: #f0fdfa;
+}
+
+/* Top & Bottom bar chrome */
+.ttd-bar-top {
+  background: linear-gradient(180deg, #3c4c59 0%, #29353f 100%);
+  border-bottom: 2px solid #11171c;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+}
+
+.ttd-bar-bottom {
+  background: linear-gradient(180deg, #2b3842 0%, #1d262e 100%);
+  border-top: 2px solid #617788;
+  box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.55);
+}
+
+/* Custom compact TTD scrollbars */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #141c22;
+  border-left: 1px solid #0c1115;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #465969;
+  border-top: 1.5px solid #758d9f;
+  border-left: 1.5px solid #758d9f;
+  border-right: 1.5px solid #1b242b;
+  border-bottom: 1.5px solid #1b242b;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #576e80;
+}
+
+/* Flashing red alert for negative corporate cash */
+@keyframes ttd-flash-danger {
+  0%, 100% {
+    background-color: #7f1d1d;
+    color: #fecaca;
+    border-color: #ef4444;
+  }
+  50% {
+    background-color: #dc2626;
+    color: #ffffff;
+    border-color: #fef08a;
+  }
+}
+
+.ttd-cash-negative {
+  animation: ttd-flash-danger 0.9s infinite ease-in-out;
+}
+
+/* News ticker smooth scroll */
+@keyframes ttd-ticker-scroll {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.ttd-ticker-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ttd-ticker-scroll 38s linear infinite;
+}
+
+.ttd-ticker-track:hover {
+  animation-play-state: paused;
+}
+
+/* Classic TTD range slider styling */
+input[type='range'].ttd-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 10px;
+  background: #131b21;
+  border-top: 1.5px solid #090d10;
+  border-left: 1.5px solid #090d10;
+  border-right: 1.5px solid #485b6b;
+  border-bottom: 1.5px solid #485b6b;
+  cursor: pointer;
+}
+
+input[type='range'].ttd-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 22px;
+  background: linear-gradient(180deg, #eab308 0%, #a16207 100%);
+  border-top: 2px solid #fef08a;
+  border-left: 2px solid #fef08a;
+  border-right: 2px solid #422006;
+  border-bottom: 2px solid #422006;
+  cursor: grab;
+}

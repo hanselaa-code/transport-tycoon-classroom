@@ -1,0 +1,96 @@
+export {
+  GameEngine,
+  createGameEngine,
+  type ApplyToolOptions,
+  type GameEngineOptions,
+} from './engine';
+
+export {
+  ALL_CARGO_TYPES,
+  CARGO_LABELS_NO,
+  INDUSTRY_LABELS_NO,
+  COMPANY_COLORS,
+  BUILD_COSTS,
+  VEHICLE_CATALOG,
+  VEHICLE_CATALOG_LIST,
+  HQ_TIERS,
+  BASE_LOAN_INTEREST_RATE,
+  LOAN_STEP_KR,
+  DEFAULT_MAX_LOAN_KR,
+  INITIAL_CORPORATE_CASH_KR,
+  INITIAL_CORPORATE_LOAN_KR,
+  INITIAL_PERSONAL_CASH_KR,
+  INITIAL_MONTHLY_GROSS_SALARY_KR,
+  MAX_MONTHLY_GROSS_SALARY_KR,
+  STATION_CATCHMENT_RADIUS,
+  HQ_BONUS_RADIUS,
+  TOTAL_AI_SHARES,
+  MAX_PLAYER_AI_SHARE_PCT,
+  AI_SHARE_BLOCK_PCT,
+  MONTHS_NO,
+  calculateVehiclePurchaseCost,
+  calculateVehicleCapacity,
+  calculateVehicleBaseAnnualCost,
+  getHQTierSpec,
+  getHQCumulativeValue,
+  createEmptyCargoRecord,
+  createInitialRatingsRecord,
+  formatNorwegianNumber,
+  formatKr,
+  formatGameDate,
+} from './catalog';
+
+export {
+  calculatePnLOperatingProfit,
+  getStationHQBonusPct,
+  doesStationAcceptCargo,
+} from './dualEconomy';
+
+export {
+  NORWEGIAN_TOWN_NAMES,
+  generateWorld,
+  tileIndex,
+  inBounds,
+} from './mapGenerator';
+
+export {
+  computeDragLineTiles,
+  findNetworkPath,
+  isTileTraversableForNetwork,
+} from './pathfinder';
+
+export {
+  SAVE_STORAGE_KEY,
+  hasSavedStateInLocalStorage,
+} from './saveManager';
+
+export type {
+  CargoType,
+  IndustryType,
+  ToolType,
+  GameSpeed,
+  VehicleModelId,
+  ScenarioType,
+  DemoRouteType,
+  TerrainType,
+  Tile,
+  Town,
+  Industry,
+  StationKind,
+  Station,
+  VehicleState,
+  Vehicle,
+  FloatingPopup,
+  PnLStatement,
+  CorporateFinance,
+  TaxBreakdown,
+  PersonalFinance,
+  AICompany,
+  NewsItem,
+  VehicleCatalogItem,
+  HQTierSpec,
+  GameDate,
+  ActionResult,
+  BuyVehicleParams,
+  GameState,
+} from '../types/game';
