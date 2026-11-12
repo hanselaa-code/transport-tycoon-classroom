@@ -8,35 +8,57 @@ import {
   getTileAt,
   getTileCornerHeights,
 } from './IsoSceneManager';
+import {
+  type TerrainTextureSet,
+  createTerrainTextureSet,
+  disposeTerrainTextureSet,
+} from './TerrainTextures';
 
 const MAX_MAP_DIM = 96;
 const MAX_TILES = MAX_MAP_DIM * MAX_MAP_DIM; // 9,216
-// 2 triangles per tile + 4*96*2 skirt wall triangles = 19,200 triangles * 3 verts = 57,600 verts
 const MAX_TERRAIN_VERTS = (MAX_TILES * 2 + MAX_MAP_DIM * 8) * 3;
 const MAX_TREES = 12000;
 const MAX_FOAM_EDGES = 10000;
-const MAX_ROAD_SEGMENTS = 20000;
-const MAX_ROAD_DASHES = 22000;
-const MAX_RAIL_BALLAST = 20000;
-const MAX_RAIL_SLEEPERS = 36000;
-const MAX_RAIL_RAILS = 36000;
 
-// Classic TTD sun vector (bright SW/W slopes, crisp shaded NE/E back-slopes)
-const SUN_DIR = new THREE.Vector3(-0.62, 0.65, 0.44).normalize();
+const MAX_ROAD_SEGMENTS = 22000;
+const MAX_ROAD_DASHES = 24000;
+const MAX_CROSSINGS = 1024;
+
+const MAX_RAIL_BALLAST = 32000;
+const MAX_RAIL_SLEEPERS = 48000;
+const MAX_RAIL_RAILS = 48000;
+const MAX_RAIL_CLIPS = 64000;
+const MAX_BUFFERS = 2048;
+
+const SUN_DIR = new THREE.Vector3(-0.62, 0.78, 0.44).normalize();
+
+type AtlasQuad = 'GRASS' | 'SAND' | 'ROCK' | 'FOREST';
+
+const ATLAS_UV_BOUNDS: Record<AtlasQuad, [number, number, number, number]> = {
+  // [u0, u1, v0, v1] with 2.5% inner margin so NearestFilter never bleeds across quadrants
+  GRASS: [0.025, 0.475, 0.525, 0.975],
+  SAND: [0.525, 0.975, 0.525, 0.975],
+  ROCK: [0.025, 0.475, 0.025, 0.475],
+  FOREST: [0.525, 0.975, 0.025, 0.475],
+};
 
 function hash2D(x: number, y: number, salt: number): number {
   let h = (x * 374761393 + y * 668265263 + salt * 1442695041) | 0;
-  h = ((h ^ (h >>> 13)) * 1274126177) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
 export class TerrainInstancer {
   public readonly group = new THREE.Group();
 
-  // Continuous watertight TTD faceted terrain mesh + earth cross-section skirt walls
+  private textures: TerrainTextureSet;
+
+  // Continuous watertight OpenGFX-textured terrain mesh + earth cross-section skirt walls
   private terrainGeo: THREE.BufferGeometry;
   private terrainPositions: Float32Array;
+  private terrainNormals: Float32Array;
   private terrainColors: Float32Array;
+  private terrainUVs: Float32Array;
   private terrainMesh: THREE.Mesh;
 
   private waterSparkleLayer: THREE.InstancedMesh;
@@ -44,28 +66,41 @@ export class TerrainInstancer {
   private gridLines: THREE.LineSegments;
   private gridGeometry: THREE.BufferGeometry;
 
-  private treeTrunks: THREE.InstancedMesh;
-  private treeCrownsLower: THREE.InstancedMesh;
-  private treeCrownsUpper: THREE.InstancedMesh;
+  // Multi-species OpenGFX temperate trees + ground contact shadow discs
+  private treeShadowDiscs: THREE.InstancedMesh;
+  private pineTrunks: THREE.InstancedMesh;
+  private pineCrownsLower: THREE.InstancedMesh;
+  private pineCrownsMid: THREE.InstancedMesh;
+  private pineCrownsUpper: THREE.InstancedMesh;
 
-  // Road network: solid 3D gravel roadbed embankment + dark asphalt surface + dashes
-  private roadEmbankment: THREE.InstancedMesh;
+  private decidTrunks: THREE.InstancedMesh;
+  private decidCanopyMain: THREE.InstancedMesh;
+  private decidCanopyAccent: THREE.InstancedMesh;
+
+  // Road network + OpenTTD Road-Rail Level Crossings
+  private roadRuralEmbankment: THREE.InstancedMesh;
+  private roadUrbanSidewalk: THREE.InstancedMesh;
   private roadAsphalt: THREE.InstancedMesh;
   private roadDashes: THREE.InstancedMesh;
 
-  // Rail network: solid 3D ballast embankment + wooden sleepers + twin steel rails + buffers
+  private crossingPlanks: THREE.InstancedMesh;
+  private crossingPosts: THREE.InstancedMesh;
+  private crossingLamps: THREE.InstancedMesh;
+  private crossingLampMat: THREE.MeshBasicMaterial;
+
+  // Rail network: speckled ballast + closely-spaced sleepers + rail clips + twin steel rails + A-frame buffers
   private railBallast: THREE.InstancedMesh;
   private railSleepers: THREE.InstancedMesh;
+  private railClips: THREE.InstancedMesh;
   private railSteel: THREE.InstancedMesh;
-  private railBuffers: THREE.InstancedMesh;
+  private railWarningBeams: THREE.InstancedMesh;
 
   private waterMaterial: THREE.MeshLambertMaterial;
   private gridPositions: Float32Array;
 
-  // Dirty-state tracking
   private lastSignature = '';
 
-  // Reusable scratch objects (zero per-rebuild GC churn)
+  // Scratch math objects
   private readonly mat4 = new THREE.Matrix4();
   private readonly rotMat = new THREE.Matrix4();
   private readonly pos = new THREE.Vector3();
@@ -82,48 +117,66 @@ export class TerrainInstancer {
   private readonly triNorm = new THREE.Vector3();
 
   constructor() {
-    // 1. Continuous Watertight Faceted Terrain Mesh (Chris Sawyer TTD vertex-shaded facets)
+    this.textures = createTerrainTextureSet();
+
+    // 1. Continuous Watertight OpenGFX Terrain Heightfield Mesh (receives crisp directional shadows!)
     this.terrainPositions = new Float32Array(MAX_TERRAIN_VERTS * 3);
+    this.terrainNormals = new Float32Array(MAX_TERRAIN_VERTS * 3);
     this.terrainColors = new Float32Array(MAX_TERRAIN_VERTS * 3);
+    this.terrainUVs = new Float32Array(MAX_TERRAIN_VERTS * 2);
+
     this.terrainGeo = new THREE.BufferGeometry();
     this.terrainGeo.setAttribute(
       'position',
       new THREE.BufferAttribute(this.terrainPositions, 3)
     );
     this.terrainGeo.setAttribute(
+      'normal',
+      new THREE.BufferAttribute(this.terrainNormals, 3)
+    );
+    this.terrainGeo.setAttribute(
       'color',
       new THREE.BufferAttribute(this.terrainColors, 3)
     );
-    const terrainMat = new THREE.MeshBasicMaterial({
+    this.terrainGeo.setAttribute(
+      'uv',
+      new THREE.BufferAttribute(this.terrainUVs, 2)
+    );
+
+    const terrainMat = new THREE.MeshLambertMaterial({
+      map: this.textures.terrainAtlas,
       vertexColors: true,
     });
     this.terrainMesh = new THREE.Mesh(this.terrainGeo, terrainMat);
+    this.terrainMesh.receiveShadow = true;
     this.terrainMesh.frustumCulled = false;
 
-    // 2. Sparkling Water Surface Caps
-    const waterGeo = new THREE.PlaneGeometry(1.004, 1.004);
+    // 2. Scrolling Pixel-Dithered OpenTTD Water Surface
+    const waterGeo = new THREE.PlaneGeometry(1.005, 1.005);
     waterGeo.rotateX(-Math.PI / 2);
     this.waterMaterial = new THREE.MeshLambertMaterial({
-      color: '#1e7fb8',
-      emissive: '#0a3a5e',
-      emissiveIntensity: 0.35,
+      map: this.textures.waterRipple,
+      color: this.textures.waterRipple ? '#ffffff' : '#1e7fb8',
+      emissive: '#093454',
+      emissiveIntensity: 0.26,
     });
     this.waterSparkleLayer = new THREE.InstancedMesh(waterGeo, this.waterMaterial, MAX_TILES);
+    this.waterSparkleLayer.receiveShadow = true;
     this.waterSparkleLayer.frustumCulled = false;
 
-    // 3. Coastal Foam Strips
-    const foamGeo = new THREE.PlaneGeometry(1.0, 0.12);
+    // 3. Coastal Surf Foam Strips
+    const foamGeo = new THREE.PlaneGeometry(1.0, 0.13);
     foamGeo.rotateX(-Math.PI / 2);
     const foamMat = new THREE.MeshBasicMaterial({
-      color: '#bae6fd',
+      color: '#dbeafe',
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.58,
       depthWrite: false,
     });
     this.shoreFoamLayer = new THREE.InstancedMesh(foamGeo, foamMat, MAX_FOAM_EDGES);
     this.shoreFoamLayer.frustumCulled = false;
 
-    // 4. Crisp TTD Isometric Sloped Tile Grid Lines
+    // 4. Crisp TTD Sloped Tile Grid Lines
     this.gridPositions = new Float32Array(MAX_TILES * 8 * 3);
     this.gridGeometry = new THREE.BufferGeometry();
     this.gridGeometry.setAttribute(
@@ -131,85 +184,224 @@ export class TerrainInstancer {
       new THREE.BufferAttribute(this.gridPositions, 3)
     );
     const gridMat = new THREE.LineBasicMaterial({
-      color: '#133215',
+      color: '#0d2610',
       transparent: true,
-      opacity: 0.28,
+      opacity: 0.26,
     });
     this.gridLines = new THREE.LineSegments(this.gridGeometry, gridMat);
     this.gridLines.frustumCulled = false;
 
-    // 5. Procedural Low-Poly Trees
-    const trunkGeo = new THREE.CylinderGeometry(0.032, 0.05, 0.24, 5);
-    trunkGeo.translate(0, 0.11, 0);
-    const trunkMat = new THREE.MeshLambertMaterial({ color: '#5c3a21' });
-    this.treeTrunks = new THREE.InstancedMesh(trunkGeo, trunkMat, MAX_TREES);
-    this.treeTrunks.frustumCulled = false;
+    // 5. Multi-Species OpenGFX Temperate Trees + Contact Shadow Discs
+    const discGeo = new THREE.CircleGeometry(0.21, 8);
+    discGeo.rotateX(-Math.PI / 2);
+    const discMat = new THREE.MeshBasicMaterial({
+      color: '#091f0d',
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+    });
+    this.treeShadowDiscs = new THREE.InstancedMesh(discGeo, discMat, MAX_TREES);
+    this.treeShadowDiscs.frustumCulled = false;
 
-    const crownLowerGeo = new THREE.ConeGeometry(0.18, 0.32, 6);
-    crownLowerGeo.translate(0, 0.31, 0);
-    const crownMat = new THREE.MeshLambertMaterial({ color: '#ffffff' });
-    this.treeCrownsLower = new THREE.InstancedMesh(crownLowerGeo, crownMat, MAX_TREES);
-    this.treeCrownsLower.frustumCulled = false;
+    // 5a. Conifer Spruce / Pine (3-tiered foliage cones)
+    const pineTrunkGeo = new THREE.CylinderGeometry(0.028, 0.046, 0.22, 5);
+    pineTrunkGeo.translate(0, 0.11, 0);
+    const pineTrunkMat = new THREE.MeshLambertMaterial({ color: '#4d2f18' });
+    this.pineTrunks = new THREE.InstancedMesh(pineTrunkGeo, pineTrunkMat, MAX_TREES);
+    this.pineTrunks.castShadow = true;
+    this.pineTrunks.frustumCulled = false;
 
-    const crownUpperGeo = new THREE.ConeGeometry(0.135, 0.28, 6);
-    crownUpperGeo.translate(0, 0.48, 0);
-    this.treeCrownsUpper = new THREE.InstancedMesh(
-      crownUpperGeo,
-      crownMat.clone(),
+    const pineLowGeo = new THREE.ConeGeometry(0.19, 0.26, 6);
+    pineLowGeo.translate(0, 0.27, 0);
+    const whiteLambert = new THREE.MeshLambertMaterial({ color: '#ffffff' });
+    this.pineCrownsLower = new THREE.InstancedMesh(pineLowGeo, whiteLambert, MAX_TREES);
+    this.pineCrownsLower.castShadow = true;
+    this.pineCrownsLower.receiveShadow = true;
+    this.pineCrownsLower.frustumCulled = false;
+
+    const pineMidGeo = new THREE.ConeGeometry(0.15, 0.24, 6);
+    pineMidGeo.translate(0, 0.41, 0);
+    this.pineCrownsMid = new THREE.InstancedMesh(
+      pineMidGeo,
+      whiteLambert.clone(),
       MAX_TREES
     );
-    this.treeCrownsUpper.frustumCulled = false;
+    this.pineCrownsMid.castShadow = true;
+    this.pineCrownsMid.receiveShadow = true;
+    this.pineCrownsMid.frustumCulled = false;
 
-    // 6. Conforming Road Network with Solid 3D Gravel/Stone Embankment Skirt
+    const pineTopGeo = new THREE.ConeGeometry(0.105, 0.22, 6);
+    pineTopGeo.translate(0, 0.55, 0);
+    this.pineCrownsUpper = new THREE.InstancedMesh(
+      pineTopGeo,
+      whiteLambert.clone(),
+      MAX_TREES
+    );
+    this.pineCrownsUpper.castShadow = true;
+    this.pineCrownsUpper.receiveShadow = true;
+    this.pineCrownsUpper.frustumCulled = false;
+
+    // 5b. Deciduous Oak / Silver Birch (pale/brown trunk + rounded multi-lobe crown)
+    const decidTrunkGeo = new THREE.CylinderGeometry(0.026, 0.042, 0.25, 5);
+    decidTrunkGeo.translate(0, 0.125, 0);
+    this.decidTrunks = new THREE.InstancedMesh(
+      decidTrunkGeo,
+      whiteLambert.clone(),
+      MAX_TREES
+    );
+    this.decidTrunks.castShadow = true;
+    this.decidTrunks.frustumCulled = false;
+
+    const decidMainGeo = new THREE.IcosahedronGeometry(0.17, 0);
+    decidMainGeo.translate(0, 0.36, 0);
+    this.decidCanopyMain = new THREE.InstancedMesh(
+      decidMainGeo,
+      whiteLambert.clone(),
+      MAX_TREES
+    );
+    this.decidCanopyMain.castShadow = true;
+    this.decidCanopyMain.receiveShadow = true;
+    this.decidCanopyMain.frustumCulled = false;
+
+    const decidSideGeo = new THREE.IcosahedronGeometry(0.125, 0);
+    decidSideGeo.translate(0.065, 0.44, 0.04);
+    this.decidCanopyAccent = new THREE.InstancedMesh(
+      decidSideGeo,
+      whiteLambert.clone(),
+      MAX_TREES
+    );
+    this.decidCanopyAccent.castShadow = true;
+    this.decidCanopyAccent.receiveShadow = true;
+    this.decidCanopyAccent.frustumCulled = false;
+
+    // 6. Conforming Road Network (Rural Gravel Embankment, Urban Stone Sidewalk, Textured Asphalt, Level Crossings)
     const unitBox = new THREE.BoxGeometry(1, 1, 1);
-    const embankMat = new THREE.MeshLambertMaterial({ color: '#78716c' });
-    this.roadEmbankment = new THREE.InstancedMesh(unitBox, embankMat, MAX_ROAD_SEGMENTS);
-    this.roadEmbankment.frustumCulled = false;
 
-    const roadMat = new THREE.MeshLambertMaterial({ color: '#2b3038' });
+    const ruralEmbankMat = new THREE.MeshLambertMaterial({
+      map: this.textures.gravelRoadbed,
+      color: this.textures.gravelRoadbed ? '#d6d3d1' : '#78716c',
+    });
+    this.roadRuralEmbankment = new THREE.InstancedMesh(
+      unitBox,
+      ruralEmbankMat,
+      MAX_ROAD_SEGMENTS
+    );
+    this.roadRuralEmbankment.receiveShadow = true;
+    this.roadRuralEmbankment.frustumCulled = false;
+
+    const urbanSidewalkMat = new THREE.MeshLambertMaterial({
+      map: this.textures.urbanSidewalk,
+      color: this.textures.urbanSidewalk ? '#ffffff' : '#94a3b8',
+    });
+    this.roadUrbanSidewalk = new THREE.InstancedMesh(
+      unitBox,
+      urbanSidewalkMat,
+      MAX_ROAD_SEGMENTS
+    );
+    this.roadUrbanSidewalk.receiveShadow = true;
+    this.roadUrbanSidewalk.frustumCulled = false;
+
+    const roadMat = new THREE.MeshLambertMaterial({
+      map: this.textures.asphalt,
+      color: this.textures.asphalt ? '#ffffff' : '#2b3038',
+    });
     this.roadAsphalt = new THREE.InstancedMesh(unitBox, roadMat, MAX_ROAD_SEGMENTS);
+    this.roadAsphalt.receiveShadow = true;
     this.roadAsphalt.frustumCulled = false;
 
-    const dashMat = new THREE.MeshBasicMaterial({ color: '#f1f5f9' });
+    const dashMat = new THREE.MeshBasicMaterial({ color: '#f8fafc' });
     this.roadDashes = new THREE.InstancedMesh(unitBox, dashMat, MAX_ROAD_DASHES);
     this.roadDashes.frustumCulled = false;
 
-    // 7. Conforming Rail Network with Solid 3D Crushed-Stone Ballast Embankment Skirt
-    const ballastMat = new THREE.MeshLambertMaterial({ color: '#6b655e' });
+    const plankMat = new THREE.MeshLambertMaterial({
+      map: this.textures.timberSleeper,
+      color: '#b48256',
+    });
+    this.crossingPlanks = new THREE.InstancedMesh(unitBox, plankMat, MAX_CROSSINGS * 4);
+    this.crossingPlanks.receiveShadow = true;
+    this.crossingPlanks.frustumCulled = false;
+
+    const postMat = new THREE.MeshLambertMaterial({
+      map: this.textures.warningStripes,
+      color: '#ffffff',
+    });
+    this.crossingPosts = new THREE.InstancedMesh(unitBox, postMat, MAX_CROSSINGS * 4);
+    this.crossingPosts.castShadow = true;
+    this.crossingPosts.frustumCulled = false;
+
+    this.crossingLampMat = new THREE.MeshBasicMaterial({ color: '#ef4444' });
+    const lampSphereGeo = new THREE.SphereGeometry(0.5, 6, 6);
+    this.crossingLamps = new THREE.InstancedMesh(
+      lampSphereGeo,
+      this.crossingLampMat,
+      MAX_CROSSINGS * 4
+    );
+    this.crossingLamps.frustumCulled = false;
+
+    // 7. Conforming Rail Network (Speckled Ballast + Timber Sleepers + Iron Clips + Steel Rails + A-Frame Buffers)
+    const ballastMat = new THREE.MeshLambertMaterial({
+      map: this.textures.ballast,
+      color: this.textures.ballast ? '#d6d3d1' : '#6b655e',
+    });
     this.railBallast = new THREE.InstancedMesh(unitBox, ballastMat, MAX_RAIL_BALLAST);
+    this.railBallast.receiveShadow = true;
     this.railBallast.frustumCulled = false;
 
-    const sleeperMat = new THREE.MeshLambertMaterial({ color: '#422819' });
+    const sleeperMat = new THREE.MeshLambertMaterial({
+      map: this.textures.timberSleeper,
+      color: this.textures.timberSleeper ? '#d6c7b8' : '#422819',
+    });
     this.railSleepers = new THREE.InstancedMesh(unitBox, sleeperMat, MAX_RAIL_SLEEPERS);
+    this.railSleepers.receiveShadow = true;
     this.railSleepers.frustumCulled = false;
 
+    const clipMat = new THREE.MeshLambertMaterial({ color: '#334155' });
+    this.railClips = new THREE.InstancedMesh(unitBox, clipMat, MAX_RAIL_CLIPS);
+    this.railClips.castShadow = true;
+    this.railClips.frustumCulled = false;
+
     const steelMat = new THREE.MeshLambertMaterial({
-      color: '#dbe4ee',
+      color: '#e2e8f0',
       emissive: '#334155',
-      emissiveIntensity: 0.22,
+      emissiveIntensity: 0.24,
     });
     this.railSteel = new THREE.InstancedMesh(unitBox, steelMat, MAX_RAIL_RAILS);
+    this.railSteel.receiveShadow = true;
     this.railSteel.frustumCulled = false;
 
-    const bufferMat = new THREE.MeshLambertMaterial({ color: '#dc2626' });
-    this.railBuffers = new THREE.InstancedMesh(unitBox, bufferMat, 2048);
-    this.railBuffers.frustumCulled = false;
+    const beamMat = new THREE.MeshLambertMaterial({
+      map: this.textures.warningStripes,
+      color: this.textures.warningStripes ? '#ffffff' : '#dc2626',
+    });
+    this.railWarningBeams = new THREE.InstancedMesh(unitBox, beamMat, MAX_BUFFERS);
+    this.railWarningBeams.castShadow = true;
+    this.railWarningBeams.frustumCulled = false;
 
     this.group.add(
       this.terrainMesh,
       this.waterSparkleLayer,
       this.shoreFoamLayer,
       this.gridLines,
-      this.roadEmbankment,
+      this.roadRuralEmbankment,
+      this.roadUrbanSidewalk,
       this.roadAsphalt,
       this.roadDashes,
       this.railBallast,
       this.railSleepers,
+      this.railClips,
       this.railSteel,
-      this.railBuffers,
-      this.treeTrunks,
-      this.treeCrownsLower,
-      this.treeCrownsUpper
+      this.crossingPlanks,
+      this.crossingPosts,
+      this.crossingLamps,
+      this.railWarningBeams,
+      this.treeShadowDiscs,
+      this.pineTrunks,
+      this.pineCrownsLower,
+      this.pineCrownsMid,
+      this.pineCrownsUpper,
+      this.decidTrunks,
+      this.decidCanopyMain,
+      this.decidCanopyAccent
     );
   }
 
@@ -247,17 +439,24 @@ export class TerrainInstancer {
   }
 
   public updateWaterAnimation(timeSec: number): void {
+    // Scroll OpenTTD pixel-dithered water ripple texture + animate coastal surf & crossing lamps
+    if (this.textures.waterRipple) {
+      this.textures.waterRipple.offset.set(
+        (timeSec * 0.038) % 1,
+        (timeSec * 0.024) % 1
+      );
+    }
     const wave = 0.5 + 0.5 * Math.sin(timeSec * 1.9);
-    this.waterMaterial.emissiveIntensity = 0.24 + wave * 0.16;
+    this.waterMaterial.emissiveIntensity = 0.18 + wave * 0.12;
+
     const foamMat = this.shoreFoamLayer.material as THREE.MeshBasicMaterial;
-    foamMat.opacity = 0.4 + 0.18 * Math.sin(timeSec * 2.3 + 0.8);
+    foamMat.opacity = 0.42 + 0.2 * Math.sin(timeSec * 2.3 + 0.8);
+
+    // Classic pulsing red warning glow on level crossing lamps
+    const flash = Math.sin(timeSec * 6.2) > 0 ? '#ff3b30' : '#991b1b';
+    this.crossingLampMat.color.set(flash);
   }
 
-  /**
-   * Composes a 3D box matrix aligned to both longitudinal tangent `fwd` (+Z local)
-   * and lateral cross-slope tangent `right` (+X local), with its top face at `topLift`
-   * above `(cx, cySurf, cz)` and bottom skirt extending `thickness - topLift` below terrain!
-   */
   private composeSurfaceAlignedBox(
     cx: number,
     cySurf: number,
@@ -276,12 +475,10 @@ export class TerrainInstancer {
     this.vFwd.set(fwdX, fwdY, fwdZ).normalize();
     this.vRight.set(rightX, rightY, rightZ).normalize();
 
-    // Upward normal: vFwd × vRight = (0,0,1) × (1,0,0) = (0,+1,0)
     this.vUp.crossVectors(this.vFwd, this.vRight).normalize();
     if (this.vUp.y < 0) {
       this.vUp.negate();
     }
-    // Re-orthogonalize vRight = vUp × vFwd
     this.vRight.crossVectors(this.vUp, this.vFwd).normalize();
 
     this.rotMat.makeBasis(this.vRight, this.vUp, this.vFwd);
@@ -297,58 +494,85 @@ export class TerrainInstancer {
     return this.mat4.compose(this.pos, this.quat, this.scale);
   }
 
-  private pushFacetedTriangle(
+  private pushTexturedFacetedTriangle(
     ax: number,
     ay: number,
     az: number,
+    au: number,
+    av: number,
     bx: number,
     by: number,
     bz: number,
+    bu: number,
+    bv: number,
     cx: number,
     cy: number,
     cz: number,
+    cu: number,
+    cv: number,
     baseHex: string,
-    applySlopeSunShade: boolean,
+    quad: AtlasQuad,
+    isLandSurface: boolean,
+    allowRockySlope: boolean,
     vertCursor: number
   ): number {
-    this.color.set(baseHex);
-
-    if (applySlopeSunShade) {
-      this.e1.set(bx - ax, by - ay, bz - az);
-      this.e2.set(cx - ax, cy - ay, cz - az);
-      this.triNorm.crossVectors(this.e1, this.e2).normalize();
-      if (this.triNorm.y < 0) this.triNorm.negate();
-
-      // Flat horizontal normal has dot = SUN_DIR.y (~0.65).
-      // Brighten sun-facing SW slopes and deepen shaded NE back-slopes like Chris Sawyer's TTD!
-      const dot = this.triNorm.dot(SUN_DIR);
-      const shadeFactor = THREE.MathUtils.clamp(1.0 + (dot - SUN_DIR.y) * 0.62, 0.66, 1.26);
-      this.color.multiplyScalar(shadeFactor);
+    this.e1.set(bx - ax, by - ay, bz - az);
+    this.e2.set(cx - ax, cy - ay, cz - az);
+    this.triNorm.crossVectors(this.e1, this.e2).normalize();
+    if (isLandSurface && this.triNorm.y < 0) {
+      this.triNorm.negate();
     }
 
-    let pi = vertCursor * 3;
-    this.terrainPositions[pi] = ax;
-    this.terrainPositions[pi + 1] = ay;
-    this.terrainPositions[pi + 2] = az;
-    this.terrainColors[pi] = this.color.r;
-    this.terrainColors[pi + 1] = this.color.g;
-    this.terrainColors[pi + 2] = this.color.b;
+    let chosenQuad = quad;
+    this.color.set(baseHex);
 
-    pi += 3;
-    this.terrainPositions[pi] = bx;
-    this.terrainPositions[pi + 1] = by;
-    this.terrainPositions[pi + 2] = bz;
-    this.terrainColors[pi] = this.color.r;
-    this.terrainColors[pi + 1] = this.color.g;
-    this.terrainColors[pi + 2] = this.color.b;
+    if (isLandSurface) {
+      // Blend steep slopes onto the OpenGFX rocky cliff quadrant
+      if (allowRockySlope && this.triNorm.y < 0.915) {
+        chosenQuad = 'ROCK';
+        const rockBlend = THREE.MathUtils.clamp((0.92 - this.triNorm.y) * 6.5, 0.35, 0.88);
+        this.color.lerp(new THREE.Color('#84887a'), rockBlend);
+      }
 
-    pi += 3;
-    this.terrainPositions[pi] = cx;
-    this.terrainPositions[pi + 1] = cy;
-    this.terrainPositions[pi + 2] = cz;
-    this.terrainColors[pi] = this.color.r;
-    this.terrainColors[pi + 1] = this.color.g;
-    this.terrainColors[pi + 2] = this.color.b;
+      // Subtle Chris Sawyer TTD facet contrast boost alongside real-time directional sun + shadowMap
+      const dot = this.triNorm.dot(SUN_DIR);
+      const facetBoost = THREE.MathUtils.clamp(1.0 + (dot - SUN_DIR.y) * 0.28, 0.84, 1.16);
+      this.color.multiplyScalar(facetBoost);
+    }
+
+    const [u0, u1, v0, v1] = ATLAS_UV_BOUNDS[chosenQuad];
+    const mapU = (uLocal: number) => u0 + uLocal * (u1 - u0);
+    const mapV = (vLocal: number) => v0 + vLocal * (v1 - v0);
+
+    const writeVert = (
+      vx: number,
+      vy: number,
+      vz: number,
+      uLoc: number,
+      vLoc: number,
+      idx: number
+    ) => {
+      const pi = idx * 3;
+      this.terrainPositions[pi] = vx;
+      this.terrainPositions[pi + 1] = vy;
+      this.terrainPositions[pi + 2] = vz;
+
+      this.terrainNormals[pi] = this.triNorm.x;
+      this.terrainNormals[pi + 1] = this.triNorm.y;
+      this.terrainNormals[pi + 2] = this.triNorm.z;
+
+      this.terrainColors[pi] = this.color.r;
+      this.terrainColors[pi + 1] = this.color.g;
+      this.terrainColors[pi + 2] = this.color.b;
+
+      const ui = idx * 2;
+      this.terrainUVs[ui] = mapU(uLoc);
+      this.terrainUVs[ui + 1] = mapV(vLoc);
+    };
+
+    writeVert(ax, ay, az, au, av, vertCursor);
+    writeVert(bx, by, bz, bu, bv, vertCursor + 1);
+    writeVert(cx, cy, cz, cu, cv, vertCursor + 2);
 
     return vertCursor + 3;
   }
@@ -385,16 +609,25 @@ export class TerrainInstancer {
     let waterIdx = 0;
     let foamIdx = 0;
     let gridFloats = 0;
-    let treeIdx = 0;
 
-    let roadEmbankIdx = 0;
+    let discIdx = 0;
+    let pineIdx = 0;
+    let decidIdx = 0;
+
+    let ruralEmbankIdx = 0;
+    let urbanSidewalkIdx = 0;
     let roadSegIdx = 0;
     let roadDashIdx = 0;
 
+    let crossingPlankIdx = 0;
+    let crossingPostIdx = 0;
+    let crossingLampIdx = 0;
+
     let ballastIdx = 0;
     let sleeperIdx = 0;
+    let clipIdx = 0;
     let railSteelIdx = 0;
-    let bufferIdx = 0;
+    let warningBeamIdx = 0;
 
     const totalCount = Math.min(tiles.length, MAX_TILES);
 
@@ -412,24 +645,36 @@ export class TerrainInstancer {
       const z0 = y - 0.5;
       const z1 = y + 0.5;
 
-      // 1. Watertight Continuous Faceted Terrain Triangles
+      // 1. Watertight Textured OpenGFX Terrain Heightfield Triangles
       let baseHex: string;
+      let quad: AtlasQuad = 'GRASS';
       if (isWater) {
-        baseHex = checker ? '#0e4266' : '#0b3959'; // Seabed beneath sparkling water plane
+        baseHex = checker ? '#0d3f63' : '#0a3656';
+        quad = 'SAND';
       } else if (tile.terrain === 'SAND') {
-        baseHex = checker ? '#dfc27d' : '#d5b66f';
+        baseHex = checker ? '#e5ca87' : '#dbc07a';
+        quad = 'SAND';
       } else if (tile.terrain === 'FOREST_TREES') {
-        baseHex = checker ? '#2d702c' : '#286527';
+        baseHex = checker ? '#317a30' : '#2b6f2a';
+        quad = 'FOREST';
       } else if (tile.townId) {
-        baseHex = checker ? '#46973c' : '#3f8c35';
+        baseHex = checker ? '#4a9e3f' : '#439339';
+        quad = 'GRASS';
+      } else if (tile.elevation >= 3) {
+        baseHex = checker ? '#4da33e' : '#459837';
+        quad = 'GRASS';
       } else {
-        // Authentic Chris Sawyer TTD emerald grass checkerboard + gentle altitude tint
-        if (tile.elevation >= 3) {
-          baseHex = checker ? '#499d3b' : '#429235';
-        } else {
-          baseHex = checker ? '#3e9132' : '#37862c';
-        }
+        baseHex = checker ? '#429835' : '#3b8d2f';
+        quad = 'GRASS';
       }
+
+      const allowRocky =
+        !isWater &&
+        tile.terrain !== 'SAND' &&
+        !tile.road &&
+        !tile.rail &&
+        !tile.townId &&
+        !tile.stationId;
 
       const yNW = isWater ? WATER_SURFACE_Y - 0.12 : cNW;
       const yNE = isWater ? WATER_SURFACE_Y - 0.12 : cNE;
@@ -438,50 +683,42 @@ export class TerrainInstancer {
 
       if (terrainVertIdx + 6 <= MAX_TERRAIN_VERTS) {
         if (splitNWSE) {
-          terrainVertIdx = this.pushFacetedTriangle(
-            x0, yNW, z0,
-            x0, ySW, z1,
-            x1, ySE, z1,
-            baseHex,
-            !isWater,
-            terrainVertIdx
+          terrainVertIdx = this.pushTexturedFacetedTriangle(
+            x0, yNW, z0, 0, 1,
+            x0, ySW, z1, 0, 0,
+            x1, ySE, z1, 1, 0,
+            baseHex, quad, !isWater, allowRocky, terrainVertIdx
           );
-          terrainVertIdx = this.pushFacetedTriangle(
-            x0, yNW, z0,
-            x1, ySE, z1,
-            x1, yNE, z0,
-            baseHex,
-            !isWater,
-            terrainVertIdx
+          terrainVertIdx = this.pushTexturedFacetedTriangle(
+            x0, yNW, z0, 0, 1,
+            x1, ySE, z1, 1, 0,
+            x1, yNE, z0, 1, 1,
+            baseHex, quad, !isWater, allowRocky, terrainVertIdx
           );
         } else {
-          terrainVertIdx = this.pushFacetedTriangle(
-            x0, yNW, z0,
-            x0, ySW, z1,
-            x1, yNE, z0,
-            baseHex,
-            !isWater,
-            terrainVertIdx
+          terrainVertIdx = this.pushTexturedFacetedTriangle(
+            x0, yNW, z0, 0, 1,
+            x0, ySW, z1, 0, 0,
+            x1, yNE, z0, 1, 1,
+            baseHex, quad, !isWater, allowRocky, terrainVertIdx
           );
-          terrainVertIdx = this.pushFacetedTriangle(
-            x1, yNE, z0,
-            x0, ySW, z1,
-            x1, ySE, z1,
-            baseHex,
-            !isWater,
-            terrainVertIdx
+          terrainVertIdx = this.pushTexturedFacetedTriangle(
+            x1, yNE, z0, 1, 1,
+            x0, ySW, z1, 0, 0,
+            x1, ySE, z1, 1, 0,
+            baseHex, quad, !isWater, allowRocky, terrainVertIdx
           );
         }
       }
 
-      // 2. Water Sparkle Cap + Coastal Foam Borders
+      // 2. Scrolling Water Layer + Shoreline Surf Foam
       if (isWater && waterIdx < MAX_TILES) {
         this.pos.set(x, WATER_SURFACE_Y, y);
         this.quat.identity();
         this.scale.set(1, 1, 1);
         this.mat4.compose(this.pos, this.quat, this.scale);
         this.waterSparkleLayer.setMatrixAt(waterIdx, this.mat4);
-        this.color.set(checker ? '#1d7db8' : '#1872aa');
+        this.color.set(checker ? '#ffffff' : '#f0f9ff');
         this.waterSparkleLayer.setColorAt(waterIdx, this.color);
         waterIdx++;
 
@@ -522,7 +759,7 @@ export class TerrainInstancer {
         }
       }
 
-      // 3. Crisp TTD Sloped Grid Lines directly along the 4 exact corner heights
+      // 3. Crisp TTD Sloped Grid Lines
       const gLift = 0.003;
       const gNW = (isWater ? WATER_SURFACE_Y : cNW) + gLift;
       const gNE = (isWater ? WATER_SURFACE_Y : cNE) + gLift;
@@ -530,28 +767,27 @@ export class TerrainInstancer {
       const gSW = (isWater ? WATER_SURFACE_Y : cSW) + gLift;
 
       if (gridFloats + 24 <= this.gridPositions.length) {
-        // North edge: NW -> NE
         this.gridPositions[gridFloats++] = x0;
         this.gridPositions[gridFloats++] = gNW;
         this.gridPositions[gridFloats++] = z0;
         this.gridPositions[gridFloats++] = x1;
         this.gridPositions[gridFloats++] = gNE;
         this.gridPositions[gridFloats++] = z0;
-        // East edge: NE -> SE
+
         this.gridPositions[gridFloats++] = x1;
         this.gridPositions[gridFloats++] = gNE;
         this.gridPositions[gridFloats++] = z0;
         this.gridPositions[gridFloats++] = x1;
         this.gridPositions[gridFloats++] = gSE;
         this.gridPositions[gridFloats++] = z1;
-        // South edge: SE -> SW
+
         this.gridPositions[gridFloats++] = x1;
         this.gridPositions[gridFloats++] = gSE;
         this.gridPositions[gridFloats++] = z1;
         this.gridPositions[gridFloats++] = x0;
         this.gridPositions[gridFloats++] = gSW;
         this.gridPositions[gridFloats++] = z1;
-        // West edge: SW -> NW
+
         this.gridPositions[gridFloats++] = x0;
         this.gridPositions[gridFloats++] = gSW;
         this.gridPositions[gridFloats++] = z1;
@@ -560,7 +796,7 @@ export class TerrainInstancer {
         this.gridPositions[gridFloats++] = z0;
       }
 
-      // 4. Procedural Trees planted flush at exact `getSurfaceHeightAt`
+      // 4. Multi-Species OpenGFX Temperate Trees + Contact Shadow Discs
       const isOccupied =
         isWater ||
         tile.road ||
@@ -574,16 +810,16 @@ export class TerrainInstancer {
       if (!isOccupied) {
         let treeCount = 0;
         if (tile.terrain === 'FOREST_TREES') {
-          treeCount = 3 + (hash2D(x, y, 1) > 0.55 ? 1 : 0);
+          treeCount = 3 + (hash2D(x, y, 1) > 0.5 ? 1 : 0);
         } else if (
           tile.terrain === 'GRASS' &&
           !tile.townId &&
-          hash2D(x, y, 2) < 0.08
+          hash2D(x, y, 2) < 0.085
         ) {
           treeCount = 1;
         }
 
-        for (let tIdx = 0; tIdx < treeCount && treeIdx < MAX_TREES; tIdx++) {
+        for (let tIdx = 0; tIdx < treeCount && discIdx < MAX_TREES; tIdx++) {
           const rx =
             treeCount === 1
               ? (hash2D(x, y, 10) - 0.5) * 0.44
@@ -594,47 +830,77 @@ export class TerrainInstancer {
               ? (hash2D(x, y, 11) - 0.5) * 0.44
               : (tIdx < 2 ? -0.22 : 0.22) +
                 (hash2D(x, y, 30 + tIdx) - 0.5) * 0.18;
-          const s = 0.78 + hash2D(x, y, 40 + tIdx) * 0.48;
+          const s = 0.78 + hash2D(x, y, 40 + tIdx) * 0.46;
           const rotY = hash2D(x, y, 50 + tIdx) * Math.PI * 2;
 
           const tx = x + rx;
           const tz = y + rz;
-          const treeY = getSurfaceHeightAt(state, tx, tz) - 0.018;
+          const surfTreeY = getSurfaceHeightAt(state, tx, tz);
 
-          this.pos.set(tx, treeY, tz);
+          // Ground contact shadow disc aligned slightly above slope
+          this.pos.set(tx, surfTreeY + 0.008, tz);
+          this.quat.identity();
+          this.scale.set(s, 1, s);
+          this.mat4.compose(this.pos, this.quat, this.scale);
+          this.treeShadowDiscs.setMatrixAt(discIdx++, this.mat4);
+
+          // Choose species: ~62% Nordic Spruce/Pine in forests, ~38% Deciduous Oak/Birch
+          const speciesRoll = hash2D(x, y, 70 + tIdx);
+          const isConifer =
+            tile.terrain === 'FOREST_TREES' ? speciesRoll < 0.65 : speciesRoll < 0.42;
+
+          this.pos.set(tx, surfTreeY - 0.018, tz);
           this.euler.set(0, rotY, 0);
           this.quat.setFromEuler(this.euler);
-          this.scale.set(s, s * (0.9 + hash2D(x, y, 60 + tIdx) * 0.3), s);
+          this.scale.set(s, s * (0.92 + hash2D(x, y, 60 + tIdx) * 0.28), s);
           this.mat4.compose(this.pos, this.quat, this.scale);
 
-          this.treeTrunks.setMatrixAt(treeIdx, this.mat4);
-          this.treeCrownsLower.setMatrixAt(treeIdx, this.mat4);
-          this.treeCrownsUpper.setMatrixAt(treeIdx, this.mat4);
+          if (isConifer && pineIdx < MAX_TREES) {
+            this.pineTrunks.setMatrixAt(pineIdx, this.mat4);
+            this.pineCrownsLower.setMatrixAt(pineIdx, this.mat4);
+            this.pineCrownsMid.setMatrixAt(pineIdx, this.mat4);
+            this.pineCrownsUpper.setMatrixAt(pineIdx, this.mat4);
 
-          const shade = hash2D(x, y, 70 + tIdx);
-          if (shade < 0.45) {
-            this.color.set('#1f632b');
-          } else if (shade < 0.85) {
-            this.color.set('#2c7a32');
-          } else {
-            this.color.set('#4d8c2b');
+            const shade = hash2D(x, y, 80 + tIdx);
+            this.color.set(shade < 0.5 ? '#185423' : '#21682b');
+            this.pineCrownsLower.setColorAt(pineIdx, this.color);
+            this.color.offsetHSL(0.008, 0.02, 0.045);
+            this.pineCrownsMid.setColorAt(pineIdx, this.color);
+            this.color.offsetHSL(0.008, 0.02, 0.045);
+            this.pineCrownsUpper.setColorAt(pineIdx, this.color);
+            pineIdx++;
+          } else if (decidIdx < MAX_TREES) {
+            this.decidTrunks.setMatrixAt(decidIdx, this.mat4);
+            this.decidCanopyMain.setMatrixAt(decidIdx, this.mat4);
+            this.decidCanopyAccent.setMatrixAt(decidIdx, this.mat4);
+
+            const vRoll = hash2D(x, y, 90 + tIdx);
+            // Silver birch pale bark vs dark oak bark
+            this.color.set(vRoll > 0.62 ? '#d6d3d1' : '#5c3a21');
+            this.decidTrunks.setColorAt(decidIdx, this.color);
+
+            if (vRoll > 0.88) {
+              this.color.set('#b48a1e'); // Warm golden birch accent
+            } else if (vRoll > 0.5) {
+              this.color.set('#4c942b'); // Temperate lime-oak green
+            } else {
+              this.color.set('#377d28'); // Deep leafy green
+            }
+            this.decidCanopyMain.setColorAt(decidIdx, this.color);
+            this.color.offsetHSL(0.012, 0.03, 0.06);
+            this.decidCanopyAccent.setColorAt(decidIdx, this.color);
+            decidIdx++;
           }
-          this.treeCrownsLower.setColorAt(treeIdx, this.color);
-          this.color.offsetHSL(0.01, 0.02, 0.05);
-          this.treeCrownsUpper.setColorAt(treeIdx, this.color);
-
-          treeIdx++;
         }
       }
 
-      // Shared edge midpoints & center height on exact terrain triangles
       const hCenter = corners.centerY;
       const hN = 0.5 * (cNW + cNE);
       const hS = 0.5 * (cSW + cSE);
       const hE = 0.5 * (cNE + cSE);
       const hW = 0.5 * (cNW + cSW);
 
-      // 5. Seamless Surface-Conforming Road Network + Solid 3D Gravel Embankments
+      // 5. Textured Roads + Urban Stone Sidewalks + OpenTTD Road-Rail Level Crossings
       if (tile.road) {
         const nN = getTileAt(state, x, y - 1);
         const nS = getTileAt(state, x, y + 1);
@@ -647,13 +913,25 @@ export class TerrainInstancer {
         const connW = isRoadConnected(nW);
         const anyConn = connN || connS || connE || connW;
 
-        // Tilt center junction hub to tile slope plane & lift over convex crests
         const hubY = Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
-        const hubWidth = tile.townId ? 0.62 : 0.54;
+        const isUrban = Boolean(tile.townId);
+        const hubWidth = isUrban ? 0.66 : 0.54;
 
-        if (roadEmbankIdx < MAX_ROAD_SEGMENTS) {
-          this.roadEmbankment.setMatrixAt(
-            roadEmbankIdx++,
+        if (isUrban) {
+          if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
+            this.roadUrbanSidewalk.setMatrixAt(
+              urbanSidewalkIdx++,
+              this.composeSurfaceAlignedBox(
+                x, hubY, y,
+                0, hS - hN, 1,
+                1, hE - hW, 0,
+                hubWidth, 0.088, hubWidth, 0.025
+              )
+            );
+          }
+        } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
+          this.roadRuralEmbankment.setMatrixAt(
+            ruralEmbankIdx++,
             this.composeSurfaceAlignedBox(
               x, hubY, y,
               0, hS - hN, 1,
@@ -662,6 +940,7 @@ export class TerrainInstancer {
             )
           );
         }
+
         if (roadSegIdx < MAX_ROAD_SEGMENTS) {
           this.roadAsphalt.setMatrixAt(
             roadSegIdx++,
@@ -669,67 +948,73 @@ export class TerrainInstancer {
               x, hubY, y,
               0, hS - hN, 1,
               1, hE - hW, 0,
-              0.46, 0.045, 0.46, 0.028
+              0.46, 0.045, 0.46, 0.029
             )
           );
         }
 
         const addRoadArm = (dx: number, dz: number, hEdge: number): void => {
-          if (roadSegIdx >= MAX_ROAD_SEGMENTS || roadEmbankIdx >= MAX_ROAD_SEGMENTS) return;
+          if (roadSegIdx >= MAX_ROAD_SEGMENTS) return;
 
           const midX = x + dx * 0.25;
           const midZ = y + dz * 0.25;
           const midY = 0.5 * (hCenter + hEdge);
-          const dLong = hEdge - hCenter; // Exact height delta over 0.5 horizontal run
+          const dLong = hEdge - hCenter;
           const armSpatialLen = Math.hypot(0.5, dLong) + 0.045;
 
-          // Exact constant cross-slope of the single underlying triangle!
           let fwdX = 0, fwdY = 0, fwdZ = 1;
           let rgtX = 1, rgtY = 0, rgtZ = 0;
 
           if (dz === -1) {
-            // North arm: forward = +Z (edge -> center), right = +X (NW -> NE)
             fwdX = 0; fwdY = hCenter - hN; fwdZ = 0.5;
             rgtX = 1; rgtY = cNE - cNW; rgtZ = 0;
           } else if (dz === 1) {
-            // South arm: forward = +Z (center -> edge), right = +X (SW -> SE)
             fwdX = 0; fwdY = hS - hCenter; fwdZ = 0.5;
             rgtX = 1; rgtY = cSE - cSW; rgtZ = 0;
           } else if (dx === 1) {
-            // East arm: forward along +X, lateral along -Z so we keep +Z/+X right-handedness
-            // Map local +Z = East (+X world), local +X = North (-Z world): (+X_w) × (-Z_w) = (0,+1,0)!
             fwdX = 0.5; fwdY = hE - hCenter; fwdZ = 0;
             rgtX = 0; rgtY = cNE - cSE; rgtZ = -1;
           } else {
-            // West arm: local +Z = East (+X world, edge -> center), local +X = North (-Z world)
             fwdX = 0.5; fwdY = hCenter - hW; fwdZ = 0;
             rgtX = 0; rgtY = cNW - cSW; rgtZ = -1;
           }
 
-          // Solid 3D gravel/curb embankment skirt (thickness 0.085, extending 0.063 below terrain!)
-          this.roadEmbankment.setMatrixAt(
-            roadEmbankIdx++,
-            this.composeSurfaceAlignedBox(
-              midX, midY, midZ,
-              fwdX, fwdY, fwdZ,
-              rgtX, rgtY, rgtZ,
-              hubWidth, 0.085, armSpatialLen + 0.02, 0.022
-            )
-          );
+          if (isUrban) {
+            if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
+              this.roadUrbanSidewalk.setMatrixAt(
+                urbanSidewalkIdx++,
+                this.composeSurfaceAlignedBox(
+                  midX, midY, midZ,
+                  fwdX, fwdY, fwdZ,
+                  rgtX, rgtY, rgtZ,
+                  hubWidth, 0.088, armSpatialLen + 0.02, 0.025
+                )
+              );
+            }
+          } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
+            this.roadRuralEmbankment.setMatrixAt(
+              ruralEmbankIdx++,
+              this.composeSurfaceAlignedBox(
+                midX, midY, midZ,
+                fwdX, fwdY, fwdZ,
+                rgtX, rgtY, rgtZ,
+                hubWidth, 0.085, armSpatialLen + 0.02, 0.022
+              )
+            );
+          }
 
-          // Dark TTD asphalt surface
           this.roadAsphalt.setMatrixAt(
             roadSegIdx++,
             this.composeSurfaceAlignedBox(
               midX, midY, midZ,
               fwdX, fwdY, fwdZ,
               rgtX, rgtY, rgtZ,
-              0.45, 0.045, armSpatialLen, 0.028
+              0.45, 0.045, armSpatialLen, 0.029
             )
           );
 
-          // Crisp center white dashed markings following exact 3D slope
-          if (roadDashIdx + 1 < MAX_ROAD_DASHES) {
+          // Skip center road dashes right inside level crossings so timber crossing planks read cleanly
+          if (!tile.rail && roadDashIdx + 1 < MAX_ROAD_DASHES) {
             for (const frac of [0.32, 0.76]) {
               const px = x + dx * (0.5 * frac);
               const pz = y + dz * (0.5 * frac);
@@ -740,7 +1025,7 @@ export class TerrainInstancer {
                   px, py, pz,
                   fwdX, fwdY, fwdZ,
                   rgtX, rgtY, rgtZ,
-                  0.034, 0.008, 0.105, 0.034
+                  0.034, 0.008, 0.105, 0.035
                 )
               );
             }
@@ -758,7 +1043,7 @@ export class TerrainInstancer {
         }
       }
 
-      // 6. Seamless Surface-Conforming Rail Network + Solid 3D Crushed-Stone Ballast Embankments
+      // 6. OpenGFX Railways (Curved 90° Arcs, Closely-Spaced Sleepers + Clips, Steel Rails, A-Frame Buffers, Level Crossings)
       if (tile.rail) {
         const nN = getTileAt(state, x, y - 1);
         const nS = getTileAt(state, x, y + 1);
@@ -773,237 +1058,499 @@ export class TerrainInstancer {
           (connN ? 1 : 0) + (connS ? 1 : 0) + (connE ? 1 : 0) + (connW ? 1 : 0);
 
         const hubY = Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
+        const gauge = 0.145;
 
-        // Center ballast embankment hub (thickness 0.09, extending ~0.06 below surface)
-        if (ballastIdx < MAX_RAIL_BALLAST) {
-          this.railBallast.setMatrixAt(
-            ballastIdx++,
-            this.composeSurfaceAlignedBox(
-              x, hubY, y,
-              0, hS - hN, 1,
-              1, hE - hW, 0,
-              0.56, 0.09, 0.56, 0.028
-            )
-          );
-        }
+        // Detect pure 90-degree curve tile (`connCount === 2` with one N/S and one E/W neighbor)
+        const isPureCurve =
+          !tile.road &&
+          !tile.stationId &&
+          !tile.depot &&
+          connCount === 2 &&
+          (connN || connS) &&
+          (connE || connW);
 
-        const addRailArm = (
-          dx: number,
-          dz: number,
-          hEdgeFull: number,
-          armFraction = 1.0
-        ): void => {
-          const armHoriz = 0.5 * armFraction;
-          const hTarget = hCenter + (hEdgeFull - hCenter) * armFraction;
-          const midX = x + dx * (armHoriz * 0.5);
-          const midZ = y + dz * (armHoriz * 0.5);
-          const midY = 0.5 * (hCenter + hTarget);
-          const dLong = hTarget - hCenter;
-          const segLen = Math.hypot(armHoriz, dLong) + 0.055;
+        const addCurvedRailArc = (dirX: number, dirZ: number, includeBallast: boolean): void => {
+          // Quarter-circle arc centered at inside tile corner `(x + dirX*0.5, y + dirZ*0.5)`
+          const arcCx = x + dirX * 0.5;
+          const arcCz = y + dirZ * 0.5;
+          const segs = 5;
 
-          let fwdX = 0, fwdY = 0, fwdZ = 1;
-          let rgtX = 1, rgtY = 0, rgtZ = 0;
+          for (let s = 0; s < segs; s++) {
+            const a0 = (s / segs) * (Math.PI * 0.5);
+            const a1 = ((s + 1) / segs) * (Math.PI * 0.5);
+            const aMid = 0.5 * (a0 + a1);
 
-          if (dz === -1) {
-            fwdX = 0; fwdY = hCenter - hN; fwdZ = 0.5;
-            rgtX = 1; rgtY = cNE - cNW; rgtZ = 0;
-          } else if (dz === 1) {
-            fwdX = 0; fwdY = hS - hCenter; fwdZ = 0.5;
-            rgtX = 1; rgtY = cSE - cSW; rgtZ = 0;
-          } else if (dx === 1) {
-            fwdX = 0.5; fwdY = hE - hCenter; fwdZ = 0;
-            rgtX = 0; rgtY = cNE - cSE; rgtZ = -1;
-          } else {
-            fwdX = 0.5; fwdY = hCenter - hW; fwdZ = 0;
-            rgtX = 0; rgtY = cNW - cSW; rgtZ = -1;
+            const mx = arcCx - dirX * 0.5 * Math.cos(aMid);
+            const mz = arcCz - dirZ * 0.5 * Math.sin(aMid);
+            const my = getSurfaceHeightAt(state, mx, mz);
+
+            const p0x = arcCx - dirX * 0.5 * Math.cos(a0);
+            const p0z = arcCz - dirZ * 0.5 * Math.sin(a0);
+            const p1x = arcCx - dirX * 0.5 * Math.cos(a1);
+            const p1z = arcCz - dirZ * 0.5 * Math.sin(a1);
+            const y0 = getSurfaceHeightAt(state, p0x, p0z);
+            const y1 = getSurfaceHeightAt(state, p1x, p1z);
+
+            const fwdX = p1x - p0x;
+            const fwdY = y1 - y0;
+            const fwdZ = p1z - p0z;
+
+            // Ensure right-handed basis `(fwd × right).y > 0`
+            let radX = -dirX * Math.cos(aMid);
+            let radZ = -dirZ * Math.sin(aMid);
+            if (fwdZ * radX - fwdX * radZ < 0) {
+              radX = -radX;
+              radZ = -radZ;
+            }
+            const rY =
+              getSurfaceHeightAt(state, mx + radX * 0.2, mz + radZ * 0.2) -
+              getSurfaceHeightAt(state, mx - radX * 0.2, mz - radZ * 0.2);
+
+            const chordLen = Math.hypot(fwdX, fwdY, fwdZ);
+
+            if (includeBallast && ballastIdx < MAX_RAIL_BALLAST) {
+              this.railBallast.setMatrixAt(
+                ballastIdx++,
+                this.composeSurfaceAlignedBox(
+                  mx, my, mz,
+                  fwdX, fwdY, fwdZ,
+                  radX * 0.4, rY, radZ * 0.4,
+                  0.56, 0.092, chordLen + 0.08, 0.028
+                )
+              );
+            }
+
+            // Inner & outer curved steel rails at exact R = 0.5 ± gauge
+            for (const rRail of [0.5 - gauge, 0.5 + gauge]) {
+              if (railSteelIdx >= MAX_RAIL_RAILS) break;
+              const rx0 = arcCx - dirX * rRail * Math.cos(a0);
+              const rz0 = arcCz - dirZ * rRail * Math.sin(a0);
+              const rx1 = arcCx - dirX * rRail * Math.cos(a1);
+              const rz1 = arcCz - dirZ * rRail * Math.sin(a1);
+              const rmx = 0.5 * (rx0 + rx1);
+              const rmz = 0.5 * (rz0 + rz1);
+              const ry0 = getSurfaceHeightAt(state, rx0, rz0);
+              const ry1 = getSurfaceHeightAt(state, rx1, rz1);
+              const rmy = Math.max(getSurfaceHeightAt(state, rmx, rmz), 0.5 * (ry0 + ry1));
+              const rLen = Math.hypot(rx1 - rx0, ry1 - ry0, rz1 - rz0);
+
+              this.railSteel.setMatrixAt(
+                railSteelIdx++,
+                this.composeSurfaceAlignedBox(
+                  rmx, rmy, rmz,
+                  rx1 - rx0, ry1 - ry0, rz1 - rz0,
+                  radX * 0.4, rY, radZ * 0.4,
+                  0.038, 0.026, rLen + 0.022, 0.058
+                )
+              );
+            }
           }
 
-          // Solid 3D ballast embankment skirt (thickness 0.09, zero holes on hill crests/valleys)
-          if (ballastIdx < MAX_RAIL_BALLAST) {
-            this.railBallast.setMatrixAt(
-              ballastIdx++,
-              this.composeSurfaceAlignedBox(
-                midX, midY, midZ,
-                fwdX, fwdY, fwdZ,
-                rgtX, rgtY, rgtZ,
-                0.55, 0.09, segLen, 0.028
-              )
-            );
-          }
+          // 6 radially fanned timber sleepers + iron rail clips along the 90° curve
+          const sleeperSteps = 6;
+          for (let k = 0; k < sleeperSteps; k++) {
+            if (sleeperIdx >= MAX_RAIL_SLEEPERS) break;
+            const ang = ((k + 0.5) / sleeperSteps) * (Math.PI * 0.5);
+            const sx = arcCx - dirX * 0.5 * Math.cos(ang);
+            const sz = arcCz - dirZ * 0.5 * Math.sin(ang);
+            const sy = getSurfaceHeightAt(state, sx, sz);
 
-          // Wooden sleepers conforming to exact 3D slope & cross-slope
-          for (const sOff of [0.11, 0.26, 0.42]) {
-            if (sOff > armHoriz + 0.02 || sleeperIdx >= MAX_RAIL_SLEEPERS) continue;
-            const frac = sOff / 0.5;
-            const sx = x + dx * sOff;
-            const sz = y + dz * sOff;
-            const sy = hCenter + (hEdgeFull - hCenter) * frac;
+            const tngX = dirX * Math.sin(ang);
+            const tngZ = -dirZ * Math.cos(ang);
+            let radX = -dirX * Math.cos(ang);
+            let radZ = -dirZ * Math.sin(ang);
+            if (tngZ * radX - tngX * radZ < 0) {
+              radX = -radX;
+              radZ = -radZ;
+            }
+            const tngY =
+              getSurfaceHeightAt(state, sx + tngX * 0.12, sz + tngZ * 0.12) -
+              getSurfaceHeightAt(state, sx - tngX * 0.12, sz - tngZ * 0.12);
+            const radY =
+              getSurfaceHeightAt(state, sx + radX * 0.18, sz + radZ * 0.18) -
+              getSurfaceHeightAt(state, sx - radX * 0.18, sz - radZ * 0.18);
+
             this.railSleepers.setMatrixAt(
               sleeperIdx++,
               this.composeSurfaceAlignedBox(
                 sx, sy, sz,
-                fwdX, fwdY, fwdZ,
-                rgtX, rgtY, rgtZ,
-                0.46, 0.022, 0.066, 0.04
+                tngX * 0.24, tngY, tngZ * 0.24,
+                radX * 0.36, radY, radZ * 0.36,
+                0.46, 0.022, 0.064, 0.041
               )
             );
-          }
 
-          // Twin parallel steel rails offset along exact normalized lateral axis
-          const gauge = 0.145;
-          const rNormLen = Math.hypot(rgtX, rgtY, rgtZ) || 1;
-          const rxUnit = rgtX / rNormLen;
-          const ryUnit = rgtY / rNormLen;
-          const rzUnit = rgtZ / rNormLen;
-
-          for (const side of [-gauge, gauge]) {
-            if (railSteelIdx >= MAX_RAIL_RAILS) break;
-            this.railSteel.setMatrixAt(
-              railSteelIdx++,
-              this.composeSurfaceAlignedBox(
-                midX + rxUnit * side,
-                midY + ryUnit * side,
-                midZ + rzUnit * side,
-                fwdX, fwdY, fwdZ,
-                rgtX, rgtY, rgtZ,
-                0.038, 0.026, segLen + 0.025, 0.056
-              )
-            );
+            // Iron rail fastener clips
+            for (const side of [-gauge, gauge]) {
+              if (clipIdx >= MAX_RAIL_CLIPS) break;
+              const cxClip = sx + radX * side;
+              const czClip = sz + radZ * side;
+              const cyClip = getSurfaceHeightAt(state, cxClip, czClip);
+              this.railClips.setMatrixAt(
+                clipIdx++,
+                this.composeSurfaceAlignedBox(
+                  cxClip, cyClip, czClip,
+                  tngX * 0.24, tngY, tngZ * 0.24,
+                  radX * 0.36, radY, radZ * 0.36,
+                  0.068, 0.012, 0.068, 0.046
+                )
+              );
+            }
           }
         };
 
-        if (connN) addRailArm(0, -1, hN);
-        if (connS) addRailArm(0, 1, hS);
-        if (connE) addRailArm(1, 0, hE);
-        if (connW) addRailArm(-1, 0, hW);
-
-        if (connCount === 0) {
-          addRailArm(1, 0, hE);
-          addRailArm(-1, 0, hW);
-        } else if (connCount === 1 && !tile.stationId && !tile.depot) {
-          const oppDx = connE ? -1 : connW ? 1 : 0;
-          const oppDz = connS ? -1 : connN ? 1 : 0;
-          const oppEdgeH = oppDx === 1 ? hE : oppDx === -1 ? hW : oppDz === 1 ? hS : hN;
-          addRailArm(oppDx, oppDz, oppEdgeH, 0.64);
-
-          if (bufferIdx < 2048) {
-            const bx = x + oppDx * 0.3;
-            const bz = y + oppDz * 0.3;
-            const by = getSurfaceHeightAt(state, bx, bz);
-            this.quat.identity();
-            this.pos.set(bx, by + 0.085, bz);
-            this.scale.set(
-              oppDx !== 0 ? 0.06 : 0.38,
-              0.095,
-              oppDz !== 0 ? 0.06 : 0.38
+        if (isPureCurve) {
+          const dirX = connE ? 1 : -1;
+          const dirZ = connS ? 1 : -1;
+          addCurvedRailArc(dirX, dirZ, true);
+        } else {
+          // Straight / Switch / Terminal / Level-Crossing Rail Geometry
+          if (ballastIdx < MAX_RAIL_BALLAST) {
+            this.railBallast.setMatrixAt(
+              ballastIdx++,
+              this.composeSurfaceAlignedBox(
+                x, hubY, y,
+                0, hS - hN, 1,
+                1, hE - hW, 0,
+                0.56, 0.092, 0.56, 0.028
+              )
             );
-            this.mat4.compose(this.pos, this.quat, this.scale);
-            this.railBuffers.setMatrixAt(bufferIdx++, this.mat4);
+          }
+
+          const addStraightRailArm = (
+            dx: number,
+            dz: number,
+            hEdgeFull: number,
+            armFraction = 1.0
+          ): void => {
+            const armHoriz = 0.5 * armFraction;
+            const hTarget = hCenter + (hEdgeFull - hCenter) * armFraction;
+            const midX = x + dx * (armHoriz * 0.5);
+            const midZ = y + dz * (armHoriz * 0.5);
+            const midY = 0.5 * (hCenter + hTarget);
+            const dLong = hTarget - hCenter;
+            const segLen = Math.hypot(armHoriz, dLong) + 0.055;
+
+            let fwdX = 0, fwdY = 0, fwdZ = 1;
+            let rgtX = 1, rgtY = 0, rgtZ = 0;
+
+            if (dz === -1) {
+              fwdX = 0; fwdY = hCenter - hN; fwdZ = 0.5;
+              rgtX = 1; rgtY = cNE - cNW; rgtZ = 0;
+            } else if (dz === 1) {
+              fwdX = 0; fwdY = hS - hCenter; fwdZ = 0.5;
+              rgtX = 1; rgtY = cSE - cSW; rgtZ = 0;
+            } else if (dx === 1) {
+              fwdX = 0.5; fwdY = hE - hCenter; fwdZ = 0;
+              rgtX = 0; rgtY = cNE - cSE; rgtZ = -1;
+            } else {
+              fwdX = 0.5; fwdY = hCenter - hW; fwdZ = 0;
+              rgtX = 0; rgtY = cNW - cSW; rgtZ = -1;
+            }
+
+            if (ballastIdx < MAX_RAIL_BALLAST) {
+              this.railBallast.setMatrixAt(
+                ballastIdx++,
+                this.composeSurfaceAlignedBox(
+                  midX, midY, midZ,
+                  fwdX, fwdY, fwdZ,
+                  rgtX, rgtY, rgtZ,
+                  0.55, 0.092, segLen, 0.028
+                )
+              );
+            }
+
+            const rNormLen = Math.hypot(rgtX, rgtY, rgtZ) || 1;
+            const rxUnit = rgtX / rNormLen;
+            const ryUnit = rgtY / rNormLen;
+            const rzUnit = rgtZ / rNormLen;
+
+            // Closely-spaced dark timber sleepers + iron rail clips
+            for (const sOff of [0.09, 0.21, 0.33, 0.44]) {
+              if (sOff > armHoriz + 0.02 || sleeperIdx >= MAX_RAIL_SLEEPERS) continue;
+              const frac = sOff / 0.5;
+              const sx = x + dx * sOff;
+              const sz = y + dz * sOff;
+              const sy = hCenter + (hEdgeFull - hCenter) * frac;
+              this.railSleepers.setMatrixAt(
+                sleeperIdx++,
+                this.composeSurfaceAlignedBox(
+                  sx, sy, sz,
+                  fwdX, fwdY, fwdZ,
+                  rgtX, rgtY, rgtZ,
+                  0.46, 0.022, 0.062, 0.041
+                )
+              );
+
+              for (const side of [-gauge, gauge]) {
+                if (clipIdx >= MAX_RAIL_CLIPS) break;
+                this.railClips.setMatrixAt(
+                  clipIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx + rxUnit * side,
+                    sy + ryUnit * side,
+                    sz + rzUnit * side,
+                    fwdX, fwdY, fwdZ,
+                    rgtX, rgtY, rgtZ,
+                    0.068, 0.012, 0.066, 0.046
+                  )
+                );
+              }
+            }
+
+            // Twin parallel steel rails
+            for (const side of [-gauge, gauge]) {
+              if (railSteelIdx >= MAX_RAIL_RAILS) break;
+              this.railSteel.setMatrixAt(
+                railSteelIdx++,
+                this.composeSurfaceAlignedBox(
+                  midX + rxUnit * side,
+                  midY + ryUnit * side,
+                  midZ + rzUnit * side,
+                  fwdX, fwdY, fwdZ,
+                  rgtX, rgtY, rgtZ,
+                  0.038, 0.026, segLen + 0.025, 0.058
+                )
+              );
+            }
+          };
+
+          if (connN) addStraightRailArm(0, -1, hN);
+          if (connS) addStraightRailArm(0, 1, hS);
+          if (connE) addStraightRailArm(1, 0, hE);
+          if (connW) addStraightRailArm(-1, 0, hW);
+
+          // Smooth curved turnout rails on 3-way & 4-way railway junctions!
+          if (!tile.road && !tile.stationId && !tile.depot && connCount >= 3) {
+            if (connN && connE) addCurvedRailArc(1, -1, false);
+            if (connN && connW) addCurvedRailArc(-1, -1, false);
+            if (connS && connE) addCurvedRailArc(1, 1, false);
+            if (connS && connW) addCurvedRailArc(-1, 1, false);
+          }
+
+          if (connCount === 0) {
+            addStraightRailArm(1, 0, hE);
+            addStraightRailArm(-1, 0, hW);
+          } else if (connCount === 1 && !tile.stationId && !tile.depot) {
+            // Terminal Track End: Detailed Steel A-Frame Buffer Stop + Red/White Warning Beam!
+            const oppDx = connE ? -1 : connW ? 1 : 0;
+            const oppDz = connS ? -1 : connN ? 1 : 0;
+            const oppEdgeH = oppDx === 1 ? hE : oppDx === -1 ? hW : oppDz === 1 ? hS : hN;
+            addStraightRailArm(oppDx, oppDz, oppEdgeH, 0.66);
+
+            const bx = x + oppDx * 0.28;
+            const bz = y + oppDz * 0.28;
+            const by = getSurfaceHeightAt(state, bx, bz);
+
+            // Twin angled steel A-frame struts over both rails
+            for (const side of [-gauge, gauge]) {
+              if (clipIdx + 1 >= MAX_RAIL_CLIPS) break;
+              const sx = bx + (oppDz !== 0 ? side : 0);
+              const sz = bz + (oppDx !== 0 ? side : 0);
+
+              // Upright steel post
+              this.quat.identity();
+              this.pos.set(sx, by + 0.095, sz);
+              this.scale.set(0.036, 0.11, 0.036);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              this.railClips.setMatrixAt(clipIdx++, this.mat4);
+
+              // Angled back-brace strut
+              this.euler.set(
+                oppDz * 0.55,
+                0,
+                -oppDx * 0.55
+              );
+              this.quat.setFromEuler(this.euler);
+              this.pos.set(sx - oppDx * 0.055, by + 0.085, sz - oppDz * 0.055);
+              this.scale.set(0.03, 0.13, 0.03);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              this.railClips.setMatrixAt(clipIdx++, this.mat4);
+            }
+
+            // Red-and-white warning buffer crossbeam
+            if (warningBeamIdx < MAX_BUFFERS) {
+              this.quat.identity();
+              this.pos.set(bx - oppDx * 0.02, by + 0.125, bz - oppDz * 0.02);
+              this.scale.set(
+                oppDx !== 0 ? 0.048 : 0.42,
+                0.055,
+                oppDz !== 0 ? 0.048 : 0.42
+              );
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              this.railWarningBeams.setMatrixAt(warningBeamIdx++, this.mat4);
+            }
+          }
+
+          // Center sleeper tie
+          if (sleeperIdx < MAX_RAIL_SLEEPERS) {
+            const ewDominant = (connE || connW) && !(connN || connS);
+            this.railSleepers.setMatrixAt(
+              sleeperIdx++,
+              this.composeSurfaceAlignedBox(
+                x, hubY, y,
+                ewDominant ? 1 : 0,
+                ewDominant ? hE - hW : hS - hN,
+                ewDominant ? 0 : 1,
+                ewDominant ? 0 : 1,
+                ewDominant ? hN - hS : hE - hW,
+                ewDominant ? -1 : 0,
+                0.46, 0.022, 0.064, 0.041
+              )
+            );
           }
         }
 
-        // Center sleeper tie aligned to slope plane
-        if (sleeperIdx < MAX_RAIL_SLEEPERS) {
-          const ewDominant = (connE || connW) && !(connN || connS);
-          this.railSleepers.setMatrixAt(
-            sleeperIdx++,
-            this.composeSurfaceAlignedBox(
-              x, hubY, y,
-              ewDominant ? 1 : 0,
-              ewDominant ? hE - hW : hS - hN,
-              ewDominant ? 0 : 1,
-              ewDominant ? 0 : 1,
-              ewDominant ? hN - hS : hE - hW,
-              ewDominant ? -1 : 0,
-              0.45, 0.022, 0.068, 0.04
-            )
-          );
+        // 7. Authentic OpenTTD Road-Rail Level Crossing (`tile.road && tile.rail`)
+        if (tile.road) {
+          const ewRail = (connE || connW) && !(connN || connS);
+          const fwdX = ewRail ? 1 : 0;
+          const fwdY = ewRail ? hE - hW : hS - hN;
+          const fwdZ = ewRail ? 0 : 1;
+          const rgtX = ewRail ? 0 : 1;
+          const rgtY = ewRail ? hN - hS : hE - hW;
+          const rgtZ = ewRail ? -1 : 0;
+
+          // Center wooden crossing plank deck between the steel rails + twin outer approach planks
+          if (crossingPlankIdx + 2 < MAX_CROSSINGS * 4) {
+            this.crossingPlanks.setMatrixAt(
+              crossingPlankIdx++,
+              this.composeSurfaceAlignedBox(
+                x, hubY, y,
+                fwdX, fwdY, fwdZ,
+                rgtX, rgtY, rgtZ,
+                0.23, 0.032, 0.52, 0.056
+              )
+            );
+
+            const rNorm = Math.hypot(rgtX, rgtY, rgtZ) || 1;
+            for (const outerSide of [-0.225, 0.225]) {
+              this.crossingPlanks.setMatrixAt(
+                crossingPlankIdx++,
+                this.composeSurfaceAlignedBox(
+                  x + (rgtX / rNorm) * outerSide,
+                  hubY + (rgtY / rNorm) * outerSide,
+                  y + (rgtZ / rNorm) * outerSide,
+                  fwdX, fwdY, fwdZ,
+                  rgtX, rgtY, rgtZ,
+                  0.09, 0.032, 0.52, 0.055
+                )
+              );
+            }
+          }
+
+          // Twin red-and-white striped warning posts + glowing red lamps at opposite corners
+          for (const [cxOff, czOff] of [
+            [-0.34, -0.34],
+            [0.34, 0.34],
+          ]) {
+            if (crossingPostIdx >= MAX_CROSSINGS * 4 || crossingLampIdx >= MAX_CROSSINGS * 4) {
+              break;
+            }
+            const px = x + cxOff;
+            const pz = y + czOff;
+            const py = getSurfaceHeightAt(state, px, pz);
+
+            this.quat.identity();
+            this.pos.set(px, py + 0.11, pz);
+            this.scale.set(0.038, 0.26, 0.038);
+            this.mat4.compose(this.pos, this.quat, this.scale);
+            this.crossingPosts.setMatrixAt(crossingPostIdx++, this.mat4);
+
+            this.pos.set(px, py + 0.255, pz);
+            this.scale.set(0.085, 0.085, 0.085);
+            this.mat4.compose(this.pos, this.quat, this.scale);
+            this.crossingLamps.setMatrixAt(crossingLampIdx++, this.mat4);
+          }
         }
       }
     }
 
-    // 7. Classic TTD Earth-Brown Cross-Section Skirt Walls along all 4 outer map borders
+    // 8. Classic TTD Stratified Earth/Rock Cross-Section Skirt Walls along all 4 outer map borders
     const minCoord = -0.5;
     const maxCoord = mapSize - 0.5;
-    const sunEarthHex = '#6e4726';
-    const shadeEarthHex = '#4b2f17';
+    const sunEarthHex = '#754d2b';
+    const shadeEarthHex = '#51341b';
 
     for (let s = 0; s < mapSize; s++) {
       if (terrainVertIdx + 24 > MAX_TERRAIN_VERTS) break;
 
-      // South border (z = maxCoord, x: s -> s+1) - sunlit in default iso view
-      const sH0 = getCornerHeight(state, s, mapSize);
-      const sH1 = getCornerHeight(state, s + 1, mapSize);
       const sx0 = s - 0.5;
       const sx1 = s + 0.5;
-      terrainVertIdx = this.pushFacetedTriangle(
-        sx0, sH0, maxCoord,
-        sx0, TERRAIN_BASE_Y, maxCoord,
-        sx1, TERRAIN_BASE_Y, maxCoord,
-        sunEarthHex, false, terrainVertIdx
-      );
-      terrainVertIdx = this.pushFacetedTriangle(
-        sx0, sH0, maxCoord,
-        sx1, TERRAIN_BASE_Y, maxCoord,
-        sx1, sH1, maxCoord,
-        sunEarthHex, false, terrainVertIdx
-      );
-
-      // East border (x = maxCoord, z: s -> s+1) - shaded cross-section
-      const eH0 = getCornerHeight(state, mapSize, s);
-      const eH1 = getCornerHeight(state, mapSize, s + 1);
       const ez0 = s - 0.5;
       const ez1 = s + 0.5;
-      terrainVertIdx = this.pushFacetedTriangle(
-        maxCoord, eH0, ez0,
-        maxCoord, eH1, ez1,
-        maxCoord, TERRAIN_BASE_Y, ez1,
-        shadeEarthHex, false, terrainVertIdx
+
+      // South border
+      const sH0 = getCornerHeight(state, s, mapSize);
+      const sH1 = getCornerHeight(state, s + 1, mapSize);
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        sx0, sH0, maxCoord, 0, 1,
+        sx0, TERRAIN_BASE_Y, maxCoord, 0, 0,
+        sx1, TERRAIN_BASE_Y, maxCoord, 1, 0,
+        sunEarthHex, 'ROCK', false, false, terrainVertIdx
       );
-      terrainVertIdx = this.pushFacetedTriangle(
-        maxCoord, eH0, ez0,
-        maxCoord, TERRAIN_BASE_Y, ez1,
-        maxCoord, TERRAIN_BASE_Y, ez0,
-        shadeEarthHex, false, terrainVertIdx
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        sx0, sH0, maxCoord, 0, 1,
+        sx1, TERRAIN_BASE_Y, maxCoord, 1, 0,
+        sx1, sH1, maxCoord, 1, 1,
+        sunEarthHex, 'ROCK', false, false, terrainVertIdx
       );
 
-      // North border (z = minCoord, x: s -> s+1) - visible when map rotated
+      // East border
+      const eH0 = getCornerHeight(state, mapSize, s);
+      const eH1 = getCornerHeight(state, mapSize, s + 1);
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        maxCoord, eH0, ez0, 0, 1,
+        maxCoord, eH1, ez1, 1, 1,
+        maxCoord, TERRAIN_BASE_Y, ez1, 1, 0,
+        shadeEarthHex, 'ROCK', false, false, terrainVertIdx
+      );
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        maxCoord, eH0, ez0, 0, 1,
+        maxCoord, TERRAIN_BASE_Y, ez1, 1, 0,
+        maxCoord, TERRAIN_BASE_Y, ez0, 0, 0,
+        shadeEarthHex, 'ROCK', false, false, terrainVertIdx
+      );
+
+      // North border
       const nH0 = getCornerHeight(state, s, 0);
       const nH1 = getCornerHeight(state, s + 1, 0);
-      terrainVertIdx = this.pushFacetedTriangle(
-        sx1, nH1, minCoord,
-        sx1, TERRAIN_BASE_Y, minCoord,
-        sx0, TERRAIN_BASE_Y, minCoord,
-        shadeEarthHex, false, terrainVertIdx
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        sx1, nH1, minCoord, 1, 1,
+        sx1, TERRAIN_BASE_Y, minCoord, 1, 0,
+        sx0, TERRAIN_BASE_Y, minCoord, 0, 0,
+        shadeEarthHex, 'ROCK', false, false, terrainVertIdx
       );
-      terrainVertIdx = this.pushFacetedTriangle(
-        sx1, nH1, minCoord,
-        sx0, TERRAIN_BASE_Y, minCoord,
-        sx0, nH0, minCoord,
-        shadeEarthHex, false, terrainVertIdx
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        sx1, nH1, minCoord, 1, 1,
+        sx0, TERRAIN_BASE_Y, minCoord, 0, 0,
+        sx0, nH0, minCoord, 0, 1,
+        shadeEarthHex, 'ROCK', false, false, terrainVertIdx
       );
 
-      // West border (x = minCoord, z: s -> s+1) - visible when map rotated
+      // West border
       const wH0 = getCornerHeight(state, 0, s);
       const wH1 = getCornerHeight(state, 0, s + 1);
-      terrainVertIdx = this.pushFacetedTriangle(
-        minCoord, wH1, ez1,
-        minCoord, wH0, ez0,
-        minCoord, TERRAIN_BASE_Y, ez0,
-        sunEarthHex, false, terrainVertIdx
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        minCoord, wH1, ez1, 1, 1,
+        minCoord, wH0, ez0, 0, 1,
+        minCoord, TERRAIN_BASE_Y, ez0, 0, 0,
+        sunEarthHex, 'ROCK', false, false, terrainVertIdx
       );
-      terrainVertIdx = this.pushFacetedTriangle(
-        minCoord, wH1, ez1,
-        minCoord, TERRAIN_BASE_Y, ez0,
-        minCoord, TERRAIN_BASE_Y, ez1,
-        sunEarthHex, false, terrainVertIdx
+      terrainVertIdx = this.pushTexturedFacetedTriangle(
+        minCoord, wH1, ez1, 1, 1,
+        minCoord, TERRAIN_BASE_Y, ez0, 0, 0,
+        minCoord, TERRAIN_BASE_Y, ez1, 1, 0,
+        sunEarthHex, 'ROCK', false, false, terrainVertIdx
       );
     }
 
-    // Commit continuous terrain mesh + grid + instanced networks
+    // Commit buffers
     this.terrainGeo.setDrawRange(0, terrainVertIdx);
     this.terrainGeo.attributes.position.needsUpdate = true;
+    this.terrainGeo.attributes.normal.needsUpdate = true;
     this.terrainGeo.attributes.color.needsUpdate = true;
+    this.terrainGeo.attributes.uv.needsUpdate = true;
 
     this.commitInstanced(this.waterSparkleLayer, waterIdx, true);
     this.commitInstanced(this.shoreFoamLayer, foamIdx, false);
@@ -1011,18 +1558,30 @@ export class TerrainInstancer {
     this.gridGeometry.setDrawRange(0, gridFloats / 3);
     this.gridGeometry.attributes.position.needsUpdate = true;
 
-    this.commitInstanced(this.treeTrunks, treeIdx, false);
-    this.commitInstanced(this.treeCrownsLower, treeIdx, true);
-    this.commitInstanced(this.treeCrownsUpper, treeIdx, true);
+    this.commitInstanced(this.treeShadowDiscs, discIdx, false);
+    this.commitInstanced(this.pineTrunks, pineIdx, false);
+    this.commitInstanced(this.pineCrownsLower, pineIdx, true);
+    this.commitInstanced(this.pineCrownsMid, pineIdx, true);
+    this.commitInstanced(this.pineCrownsUpper, pineIdx, true);
 
-    this.commitInstanced(this.roadEmbankment, roadEmbankIdx, false);
+    this.commitInstanced(this.decidTrunks, decidIdx, true);
+    this.commitInstanced(this.decidCanopyMain, decidIdx, true);
+    this.commitInstanced(this.decidCanopyAccent, decidIdx, true);
+
+    this.commitInstanced(this.roadRuralEmbankment, ruralEmbankIdx, false);
+    this.commitInstanced(this.roadUrbanSidewalk, urbanSidewalkIdx, false);
     this.commitInstanced(this.roadAsphalt, roadSegIdx, false);
     this.commitInstanced(this.roadDashes, roadDashIdx, false);
 
+    this.commitInstanced(this.crossingPlanks, crossingPlankIdx, false);
+    this.commitInstanced(this.crossingPosts, crossingPostIdx, false);
+    this.commitInstanced(this.crossingLamps, crossingLampIdx, false);
+
     this.commitInstanced(this.railBallast, ballastIdx, false);
     this.commitInstanced(this.railSleepers, sleeperIdx, false);
+    this.commitInstanced(this.railClips, clipIdx, false);
     this.commitInstanced(this.railSteel, railSteelIdx, false);
-    this.commitInstanced(this.railBuffers, bufferIdx, false);
+    this.commitInstanced(this.railWarningBeams, warningBeamIdx, false);
   }
 
   private commitInstanced(
@@ -1044,16 +1603,26 @@ export class TerrainInstancer {
     const meshes: THREE.InstancedMesh[] = [
       this.waterSparkleLayer,
       this.shoreFoamLayer,
-      this.treeTrunks,
-      this.treeCrownsLower,
-      this.treeCrownsUpper,
-      this.roadEmbankment,
+      this.treeShadowDiscs,
+      this.pineTrunks,
+      this.pineCrownsLower,
+      this.pineCrownsMid,
+      this.pineCrownsUpper,
+      this.decidTrunks,
+      this.decidCanopyMain,
+      this.decidCanopyAccent,
+      this.roadRuralEmbankment,
+      this.roadUrbanSidewalk,
       this.roadAsphalt,
       this.roadDashes,
+      this.crossingPlanks,
+      this.crossingPosts,
+      this.crossingLamps,
       this.railBallast,
       this.railSleepers,
+      this.railClips,
       this.railSteel,
-      this.railBuffers,
+      this.railWarningBeams,
     ];
     for (const m of meshes) {
       m.geometry.dispose();
@@ -1061,5 +1630,6 @@ export class TerrainInstancer {
     }
     this.gridGeometry.dispose();
     (this.gridLines.material as THREE.Material).dispose();
+    disposeTerrainTextureSet(this.textures);
   }
 }

@@ -253,6 +253,12 @@ export class IsoSceneManager {
   private mapSize = 64;
   private hasInitializedCenter = false;
 
+  // Directional sun light whose shadow camera tracks panTarget cleanly every frame
+  private sunLight!: THREE.DirectionalLight;
+  private readonly sunOffsetDir = new THREE.Vector3(-0.62, 0.78, 0.44).normalize();
+  private readonly shadowRight = new THREE.Vector3();
+  private readonly shadowUp = new THREE.Vector3();
+
   // Keyboard pan state
   private pressedKeys = new Set<string>();
 
@@ -309,6 +315,8 @@ export class IsoSceneManager {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     this.renderer.setSize(this.viewportWidth, this.viewportHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     const dom = this.renderer.domElement;
     dom.style.width = '100%';
@@ -413,16 +421,34 @@ export class IsoSceneManager {
   }
 
   private setupLighting(): void {
-    // Crisp TTD daylight for 3D buildings, industries, signals, and vehicles
-    const hemiLight = new THREE.HemisphereLight('#f8fafc', '#2b5430', 1.02);
+    // Authentic OpenTTD / OpenGFX crisp isometric daylight + directional shadow sun
+    const hemiLight = new THREE.HemisphereLight('#f8fafc', '#2c5430', 0.92);
     hemiLight.position.set(0, 60, 0);
     this.scene.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight('#fff8e7', 1.18);
-    sunLight.position.set(-48, 76, 36);
-    this.scene.add(sunLight);
+    this.sunLight = new THREE.DirectionalLight('#fff9eb', 1.28);
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.camera.near = 2;
+    this.sunLight.shadow.camera.far = 125;
+    this.sunLight.shadow.bias = -0.00045;
+    this.sunLight.shadow.normalBias = 0.018;
 
-    const fillLight = new THREE.DirectionalLight('#bae6fd', 0.34);
+    const halfSpan = 22;
+    this.sunLight.shadow.camera.left = -halfSpan;
+    this.sunLight.shadow.camera.right = halfSpan;
+    this.sunLight.shadow.camera.top = halfSpan;
+    this.sunLight.shadow.camera.bottom = -halfSpan;
+    this.sunLight.shadow.camera.updateProjectionMatrix();
+
+    this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
+
+    // Precompute stable orthogonal basis in light space for texel-snapped shadow tracking
+    this.shadowRight.crossVectors(new THREE.Vector3(0, 1, 0), this.sunOffsetDir).normalize();
+    this.shadowUp.crossVectors(this.sunOffsetDir, this.shadowRight).normalize();
+
+    const fillLight = new THREE.DirectionalLight('#bae6fd', 0.28);
     fillLight.position.set(42, 34, -44);
     this.scene.add(fillLight);
   }
@@ -650,6 +676,49 @@ export class IsoSceneManager {
       this.panTarget.z + backZ * CAMERA_DISTANCE
     );
     this.camera.updateMatrixWorld();
+
+    // Update tight orthographic shadow frustum tracking panTarget with light-space texel snapping
+    if (this.sunLight) {
+      const halfSpan = THREE.MathUtils.clamp(24 / Math.sqrt(this.currentZoom), 14, 34);
+      const cam = this.sunLight.shadow.camera;
+      if (Math.abs(cam.right - halfSpan) > 0.5) {
+        cam.left = -halfSpan;
+        cam.right = halfSpan;
+        cam.top = halfSpan;
+        cam.bottom = -halfSpan;
+        cam.updateProjectionMatrix();
+      }
+
+      const texelSize = (cam.right - cam.left) / 2048;
+      const projR =
+        Math.round(this.panTarget.dot(this.shadowRight) / texelSize) * texelSize;
+      const projU =
+        Math.round(this.panTarget.dot(this.shadowUp) / texelSize) * texelSize;
+      const projD = this.panTarget.dot(this.sunOffsetDir);
+
+      const tx =
+        this.shadowRight.x * projR +
+        this.shadowUp.x * projU +
+        this.sunOffsetDir.x * projD;
+      const ty =
+        this.shadowRight.y * projR +
+        this.shadowUp.y * projU +
+        this.sunOffsetDir.y * projD;
+      const tz =
+        this.shadowRight.z * projR +
+        this.shadowUp.z * projU +
+        this.sunOffsetDir.z * projD;
+
+      const sunDist = 58;
+      this.sunLight.target.position.set(tx, ty, tz);
+      this.sunLight.target.updateMatrixWorld();
+      this.sunLight.position.set(
+        tx + this.sunOffsetDir.x * sunDist,
+        ty + this.sunOffsetDir.y * sunDist,
+        tz + this.sunOffsetDir.z * sunDist
+      );
+      this.sunLight.updateMatrixWorld();
+    }
   }
 
   /**

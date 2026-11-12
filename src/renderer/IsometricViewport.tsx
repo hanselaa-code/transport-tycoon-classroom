@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import * as THREE from 'three';
 import { BUILD_COSTS, type GameEngine } from '../core';
 import type { GameState, Tile, ToolType } from '../types/game';
 import { FloatingPopups } from './FloatingPopups';
@@ -541,6 +542,33 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onWindowBlur);
 
+    const syncGroupShadows = (root: THREE.Group): void => {
+      const children = root.children;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (child.userData.__shadowChildCount === child.children.length && child.userData.__shadowSynced) {
+          continue;
+        }
+        child.traverse((node) => {
+          if (node instanceof THREE.Mesh && !node.userData.__shadowSynced) {
+            const mat = Array.isArray(node.material) ? node.material[0] : node.material;
+            const isUnlitOrTransparent =
+              !mat ||
+              mat instanceof THREE.MeshBasicMaterial ||
+              mat.transparent === true ||
+              mat.opacity < 0.95;
+            if (!isUnlitOrTransparent) {
+              node.castShadow = true;
+              node.receiveShadow = true;
+            }
+            node.userData.__shadowSynced = true;
+          }
+        });
+        child.userData.__shadowSynced = true;
+        child.userData.__shadowChildCount = child.children.length;
+      }
+    };
+
     // 60 FPS Render Loop
     let rafId = 0;
     let prevPerfMs = performance.now();
@@ -563,7 +591,15 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       terrainInstancer.updateWaterAnimation(timeSec);
 
       structuresRenderer.sync(latestState);
+      (
+        structuresRenderer as unknown as {
+          updateAnimation?: (timeSec: number, dtSec: number) => void;
+        }
+      ).updateAnimation?.(timeSec, dtSec);
       vehicleRenderer.update(latestState, dtSec, nowPerfMs);
+
+      syncGroupShadows(structuresRenderer.group);
+      syncGroupShadows(vehicleRenderer.group);
 
       sceneMgr.updateHoverAndDragPreview(
         hoverTile,

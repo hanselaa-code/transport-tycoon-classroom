@@ -35,6 +35,9 @@ import {
   getSurfaceHeightAt,
   getTileCornerHeights,
 } from '../src/renderer/IsoSceneManager';
+import { TerrainInstancer } from '../src/renderer/TerrainInstancer';
+import { StructuresRenderer } from '../src/renderer/StructuresRenderer';
+import { VehicleRenderer } from '../src/renderer/VehicleRenderer';
 import { firebaseConfig, hasValidFirebaseConfig } from '../src/firebase/config';
 import {
   createClassroomSession,
@@ -962,6 +965,46 @@ async function main(): Promise<void> {
   );
 
   console.log('  [OK] Firebase configuration, firestore.rules, Classroom exports & Save JSON roundtrip verified.');
+
+  // =========================================================================
+  // 8. Round 3 OpenGFX 3D Renderers Headless Integration & Disposal
+  // =========================================================================
+  section('8. Round 3 OpenGFX 3D Renderers (Terrain, Buildings & Vehicles) Headless QA');
+
+  // Upgrade HQ on transportEngine across Tiers 1..5 and exercise all 3 OpenGFX renderers headlessly
+  transportEngine.grantDevFunds('personal', 5_000_000);
+  const terrainInstancer = new TerrainInstancer();
+  const structuresRenderer = new StructuresRenderer(null as unknown as HTMLElement);
+  const vehicleRenderer = new VehicleRenderer();
+
+  for (let hqStep = 1; hqStep <= 5; hqStep++) {
+    transportEngine.upgradeHQ();
+    const gfxState = transportEngine.getState();
+    terrainInstancer.sync(gfxState);
+    terrainInstancer.updateWaterAnimation(hqStep * 0.5);
+    structuresRenderer.sync(gfxState);
+    structuresRenderer.updateAnimation(hqStep * 0.5, 0.016);
+    vehicleRenderer.update(gfxState, 0.016, hqStep * 500);
+  }
+
+  assert(
+    terrainInstancer.group.children.length > 0,
+    'TerrainInstancer populated 3D terrain, trees, roads, level crossings & rails'
+  );
+  assert(
+    structuresRenderer.group.children.length > 0,
+    'StructuresRenderer populated OpenGFX buildings, industries, stations, signals & HQ'
+  );
+  assert(
+    vehicleRenderer.group.children.length > 0,
+    'VehicleRenderer populated OpenGFX locomotives, cargo wagons, buses & trucks'
+  );
+
+  terrainInstancer.dispose();
+  structuresRenderer.dispose();
+  vehicleRenderer.dispose();
+
+  console.log('  [OK] TerrainInstancer, StructuresRenderer & VehicleRenderer synced, animated & disposed cleanly.');
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }
 
