@@ -1,0 +1,56 @@
+name: Deploy to Firebase Hosting
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build_and_deploy:
+    name: Build & Deploy Classroom App
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run headless simulation verification
+        run: npm run verify
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Deploy with Firebase Service Account (if configured)
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT != '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: tt-classroom-ed-2026
+
+      - name: Deploy with FIREBASE_TOKEN fallback (if configured)
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT == '' && env.FIREBASE_TOKEN != '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: npx --yes firebase-tools deploy --only hosting,firestore:rules --project tt-classroom-ed-2026 --token "$FIREBASE_TOKEN"
+
+      - name: Deployment secret notice
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT == '' && env.FIREBASE_TOKEN == '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          echo "Build and simulation checks passed. Add FIREBASE_SERVICE_ACCOUNT or FIREBASE_TOKEN repository secret to enable automatic CD from GitHub Actions."
