@@ -16,6 +16,7 @@ import {
   PnLStatement,
   ScenarioType,
   Station,
+  StationKind,
 } from '../types/game';
 import {
   ALL_CARGO_TYPES,
@@ -143,18 +144,99 @@ export function getStationHQBonusPct(
   return 0;
 }
 
+export function isCargoCompatibleWithStationKind(
+  kind: StationKind,
+  cargo: CargoType
+): boolean {
+  if (kind === 'BUS_STOP') {
+    return cargo === 'PASSENGERS';
+  }
+  if (kind === 'TRUCK_BAY') {
+    return cargo !== 'PASSENGERS';
+  }
+  return true;
+}
+
+export function getStationSuppliedCargos(
+  state: GameState,
+  station: Station
+): CargoType[] {
+  const supplied: CargoType[] = [];
+  for (const cargo of ALL_CARGO_TYPES) {
+    if (!isCargoCompatibleWithStationKind(station.kind, cargo)) {
+      continue;
+    }
+    if (
+      doesStationCatchmentProduceCargo(state, station, cargo) ||
+      (station.waitingCargo[cargo] ?? 0) > 0
+    ) {
+      supplied.push(cargo);
+    }
+  }
+  return supplied;
+}
+
+export function getStationAcceptedCargosWithSources(
+  state: GameState,
+  station: Station
+): Array<{ cargo: CargoType; sourceName: string }> {
+  const result: Array<{ cargo: CargoType; sourceName: string }> = [];
+
+  for (const cargo of ALL_CARGO_TYPES) {
+    if (!isCargoCompatibleWithStationKind(station.kind, cargo)) {
+      continue;
+    }
+
+    let matchedIndustryName: string | null = null;
+    for (const indId of station.nearbyIndustryIds) {
+      const ind = state.industries.find((i) => i.id === indId);
+      if (ind && ind.accepts.includes(cargo)) {
+        matchedIndustryName = ind.name;
+        break;
+      }
+    }
+    if (matchedIndustryName) {
+      result.push({ cargo, sourceName: matchedIndustryName });
+      continue;
+    }
+
+    if (station.townId) {
+      const town = state.towns.find((t) => t.id === station.townId);
+      if (
+        town &&
+        (cargo === 'PASSENGERS' ||
+          cargo === 'MAIL' ||
+          cargo === 'GOODS' ||
+          cargo === 'FOOD')
+      ) {
+        result.push({ cargo, sourceName: town.name });
+      }
+    }
+  }
+
+  return result;
+}
+
 export function updateStationRatings(state: GameState): void {
   for (const station of state.stations) {
     const hqBonus = getStationHQBonusPct(station, state.corporate);
-    const maxSpeed = station.lastVehicleMaxSpeedKmh ?? 80;
+    const maxSpeed =
+      station.lastVehicleMaxSpeedKmh ??
+      (station.kind === 'TRAIN_STATION' ? 88 : 56);
+    const suppliedSet = new Set(getStationSuppliedCargos(state, station));
+
     for (const cargo of ALL_CARGO_TYPES) {
-      const waiting = station.waitingCargo[cargo] ?? 0;
-      station.ratings[cargo] = calculateStationRating(
-        station.daysSincePickup,
-        maxSpeed,
-        waiting,
-        hqBonus
-      );
+      if (suppliedSet.has(cargo)) {
+        const waiting = station.waitingCargo[cargo] ?? 0;
+        station.ratings[cargo] = calculateStationRating(
+          station.daysSincePickup,
+          maxSpeed,
+          waiting,
+          hqBonus
+        );
+      } else {
+        station.ratings[cargo] = 0;
+      }
     }
   }
 }
@@ -263,6 +345,10 @@ export function doesStationAcceptCargo(
   station: Station,
   cargo: CargoType
 ): { accepts: boolean; targetIndustryId: string | null; targetTownId: string | null } {
+  if (!isCargoCompatibleWithStationKind(station.kind, cargo)) {
+    return { accepts: false, targetIndustryId: null, targetTownId: null };
+  }
+
   // Check industries in catchment first
   for (const indId of station.nearbyIndustryIds) {
     const ind = state.industries.find((i) => i.id === indId);

@@ -28,6 +28,7 @@ import { ClassroomWindow } from './ui/windows/ClassroomWindow';
 import { SaveLoadWindow } from './ui/windows/SaveLoadWindow';
 import { QuickTestWindow } from './ui/windows/QuickTestWindow';
 import { LandInfoWindow } from './ui/windows/LandInfoWindow';
+import { StationDetailWindow } from './ui/windows/StationDetailWindow';
 import { formatGameDate } from './ui/formatters';
 
 const STUDENT_ID_KEY = 'tt_classroom_student_id_v1';
@@ -106,6 +107,7 @@ export const App: React.FC = () => {
   // Depot / Vehicle / Station selection state
   const [selectedDepot, setSelectedDepot] = useState<DepotSelection | null>(null);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  const [selectedStationId, setSelectedStationId] = useState<string | null>(null);
   const [highlightedStationId, setHighlightedStationId] = useState<string | null>(
     null
   );
@@ -316,19 +318,35 @@ export const App: React.FC = () => {
   );
 
   // Map entity click handlers
+  const handleOpenStation = useCallback(
+    (stationId: string) => {
+      setSelectedStationId(stationId);
+      setHighlightedStationId(stationId);
+      openWindow('station_detail');
+    },
+    [openWindow]
+  );
+
   const handleDepotClick = useCallback(
     (x: number, y: number, depotType: 'ROAD' | 'RAIL') => {
+      const cur = engine.getState();
+      const tile = cur.tiles.find((t) => t.x === x && t.y === y);
+      if (tile?.ownerId && tile.ownerId !== 'player') {
+        setLandInfoCoords({ x, y });
+        openWindow('land_info');
+        return;
+      }
       setSelectedDepot({ x, y, depotType });
       setSelectedVehicleId(null);
       openWindow('depot');
     },
-    [openWindow]
+    [engine, openWindow]
   );
 
   const handleVehicleClick = useCallback(
     (vehicleId: string) => {
       const veh = engine.getState().vehicles.find((v) => v.id === vehicleId);
-      if (veh && veh.ownerId && veh.ownerId !== 'player') return;
+      if (!veh) return;
       setSelectedVehicleId(vehicleId);
       openWindow('depot');
     },
@@ -337,10 +355,9 @@ export const App: React.FC = () => {
 
   const handleStationClick = useCallback(
     (stationId: string) => {
-      setHighlightedStationId(stationId);
-      openWindow('directory');
+      handleOpenStation(stationId);
     },
-    [openWindow]
+    [handleOpenStation]
   );
 
   // Station Order Picker callback passed into IsometricViewport
@@ -584,6 +601,23 @@ export const App: React.FC = () => {
             closeWindow(id);
           }}
           onFocusTile={handleFocusTile}
+          onOpenStation={handleOpenStation}
+        />
+      )}
+
+      {openWindows.has('station_detail') && selectedStationId && (
+        <StationDetailWindow
+          engine={engine}
+          state={state}
+          stationId={selectedStationId}
+          zIndex={getZIndex('station_detail')}
+          onFocus={bringToFront}
+          onClose={closeWindow}
+          onFocusTile={handleFocusTile}
+          onInspectVehicle={(vid) => {
+            setSelectedVehicleId(vid);
+            openWindow('depot');
+          }}
         />
       )}
 
@@ -618,6 +652,7 @@ export const App: React.FC = () => {
             setPickingOrdersForVehicleId(vid);
           }}
           onFocusTile={handleFocusTile}
+          onOpenStation={handleOpenStation}
         />
       )}
 

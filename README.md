@@ -11,7 +11,7 @@ Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / Open
   - **15 bybygnings-arketyper (Nivå 1–3)** med saltak, valmtak og mansardtak, norsk trepanel/murstein/fasadetekstur, samt **6 animerte industrianlegg** (roterende heishjul i kullgruve, kjøletårndamp i kraftverk, sagbruk med portalkran, skogbruk, gård med kornsiloer og matfabrikk).
   - **Detaljerte norske lokomotiver, vogner og lastebiler**: *NSB Type 26* damplok med bevegelige drivstenger og kulltender, *NSB Di 3 Nohab* diesellok, *NSB El 18* hurtigtog med strømavtaker, samt 7 spesialiserte vogn- og lastebiltyper som gradvis fylles visuelt med kull, korn, tømmerstokker og ISO-containere.
 - **Autentisk OpenTTD Transportøkonomi & Tempo**:
-  - Realistiske TTD-hastigheter (`56 km/h` buss, `54 km/h` lastebil, `88–175 km/h` lokomotiver), gradvis lasting på stasjoner med synlige ventende passasjerer og varer på perrongen, **`Full last`**-ordrevalg, blokksignaler på jernbane og klassisk **`[?]` Landinformasjon**-verktøy.
+  - Realistiske TTD-hastigheter (`56 km/h` buss, `54 km/h` lastebil, `88–175 km/h` lokomotiver), gradvis lasting på stasjoner med synlige ventende passasjerer og varer på perrongen, **`Full last`**-ordrevalg, blokksignaler på jernbane, dedikert **stasjonsvindu** med selvforklarende kundetilfredshet/markedsandel (for både egne og konkurrenters stasjoner/kjøretøy) og klassisk **`[?]` Landinformasjon**-verktøy.
   - Kalibrerte OpenTTD C++-fraktformler (`_default_cargo`) med avstandsbetaling, tidsforfall (`days1`/`days2`) og stigningsmotstand.
 - **Delt økonomi (Selskap AS vs. Privatøkonomi)**:
   - Selskapet starter med `2 000 000 kr` i kontanter og lån (justerbart i trinn på `100 000 kr`), likviditetsvarsel ved negativ kassebeholdning og resultatregnskap (P&L).
@@ -25,7 +25,7 @@ Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / Open
 ```bash
 npm install
 npm run dev      # Start lokal utviklingsserver (Vite)
-npm run verify   # Kjør hodeløs simulerings-, høydefelts- og 3D-rendererverifisering (42 244 sjekker)
+npm run verify   # Kjør hodeløs simulerings-, høydefelts- og 3D-rendererverifisering (42 489 sjekker)
 npm run build    # TypeScript-sjekk og produksjonsbygg (tsc -b && vite build)
 ```
 

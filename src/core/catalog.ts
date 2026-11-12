@@ -278,13 +278,13 @@ export function createEmptyCargoRecord(): Record<CargoType, number> {
 
 export function createInitialRatingsRecord(): Record<CargoType, number> {
   return {
-    PASSENGERS: 65,
-    MAIL: 65,
-    COAL: 65,
-    WOOD: 65,
-    GOODS: 65,
-    GRAIN: 65,
-    FOOD: 65,
+    PASSENGERS: 0,
+    MAIL: 0,
+    COAL: 0,
+    WOOD: 0,
+    GOODS: 0,
+    GRAIN: 0,
+    FOOD: 0,
   };
 }
 

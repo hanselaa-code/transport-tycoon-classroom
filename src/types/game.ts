@@ -318,6 +318,18 @@ export interface TileInspectionInfo {
   descriptionNo: string;
 }
 
+export interface StationDetailsInfo {
+  station: Station;
+  ownerId: string;
+  ownerName: string;
+  ownerColor: string;
+  isPlayerOwned: boolean;
+  suppliedCargos: CargoType[];
+  acceptedCargos: Array<{ cargo: CargoType; sourceName: string }>;
+  servicingVehicles: Vehicle[];
+  hqBonusPct: number;
+}
+
 export interface GameState {
   mapSize: number;
   tiles: Tile[];

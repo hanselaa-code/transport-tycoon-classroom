@@ -34,7 +34,8 @@ export type WindowId =
   | 'save_load'
   | 'classroom'
   | 'quick_test'
-  | 'land_info';
+  | 'land_info'
+  | 'station_detail';
 
 export interface TopToolbarProps {
   speed: GameSpeed;

@@ -19,7 +19,7 @@ import type {
   VehicleCatalogItem,
   VehicleModelId,
 } from '../../types/game';
-import { GameEngine, VEHICLE_CATALOG_LIST } from '../../core';
+import { COMPANY_COLORS, GameEngine, VEHICLE_CATALOG_LIST } from '../../core';
 import {
   CARGO_COLORS,
   CARGO_LABELS_NO,
@@ -50,6 +50,7 @@ export interface DepotAndOrdersWindowProps {
   onSelectDepot: (depot: DepotSelection) => void;
   onToggleStationPicker: (vehicleId: string | null) => void;
   onFocusTile: (x: number, y: number) => void;
+  onOpenStation?: (stationId: string) => void;
 }
 
 export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
@@ -65,6 +66,7 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
   onSelectDepot,
   onToggleStationPicker,
   onFocusTile,
+  onOpenStation,
 }) => {
   const playerDepots = useMemo(() => {
     return state.tiles
@@ -87,6 +89,13 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
 
   const activeVehicle =
     playerVehicles.find((v) => v.id === selectedVehicleId) ?? null;
+
+  const rivalVehicle = useMemo(() => {
+    if (!selectedVehicleId) return null;
+    const found = state.vehicles.find((v) => v.id === selectedVehicleId);
+    if (found && found.ownerId && found.ownerId !== 'player') return found;
+    return null;
+  }, [state.vehicles, selectedVehicleId]);
 
   const [tab, setTab] = useState<'buy' | 'orders'>(
     selectedVehicleId ? 'orders' : 'buy'
@@ -289,6 +298,224 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
           12
       )
     : 0;
+
+  if (rivalVehicle) {
+    const aiOwner = state.aiCompanies.find((a) => a.id === rivalVehicle.ownerId);
+    const ownerName = aiOwner?.name ?? 'Konkurrent AS';
+    const ownerColor =
+      aiOwner?.color ??
+      COMPANY_COLORS[rivalVehicle.ownerId ?? 'ai-1'] ??
+      '#a855f7';
+    const rivalSpec = VEHICLE_CATALOG_LIST.find(
+      (c) => c.id === rivalVehicle.modelId
+    );
+
+    return (
+      <TTDWindow
+        id="depot"
+        title={`Konkurrent-kjøretøy – ${rivalVehicle.name}`}
+        subtitle={`${ownerName} (Kun visning)`}
+        icon={
+          rivalVehicle.network === 'RAIL' ? (
+            <TrainFront className="w-3.5 h-3.5" />
+          ) : (
+            <Truck className="w-3.5 h-3.5" />
+          )
+        }
+        theme="purple"
+        defaultX={220}
+        defaultY={62}
+        width={510}
+        zIndex={zIndex}
+        onFocus={onFocus}
+        onClose={(id) => {
+          onToggleStationPicker(null);
+          onClose(id);
+        }}
+      >
+        {/* Rival Company Owner Header */}
+        <div className="ttd-panel p-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              className="w-3.5 h-7 shrink-0 border border-black/60"
+              style={{ backgroundColor: ownerColor }}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-bold text-amber-100 text-xs truncate">
+                  {ownerName}
+                </span>
+                <span className="px-1.5 py-0.2 bg-purple-950/90 border border-purple-500/70 text-purple-200 text-[10px] font-bold">
+                  Konkurrent
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-300 ttd-num">
+                {rivalSpec?.nameNo ?? rivalVehicle.modelId}
+                {rivalVehicle.network === 'RAIL' && rivalVehicle.wagonCount > 0
+                  ? ` • ${rivalVehicle.wagonCount} vogner`
+                  : ''}{' '}
+                • Maksfart {rivalVehicle.maxSpeedKmh} km/t
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                onFocusTile(
+                  Math.round(rivalVehicle.x),
+                  Math.round(rivalVehicle.y)
+                )
+              }
+              className="ttd-btn !px-2.5 !py-1"
+            >
+              <Crosshair className="w-3.5 h-3.5" />
+              <span>Sentrer kamera</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Status, Cargo Load Bar & Profit This Year */}
+        <div className="ttd-panel p-2 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] ttd-num">
+            <div>
+              Status:{' '}
+              <strong
+                className={
+                  rivalVehicle.state === 'LOADING'
+                    ? 'ttd-gold'
+                    : 'text-emerald-300'
+                }
+              >
+                {rivalVehicle.state === 'LOADING'
+                  ? `Laster: ${formatNumber(
+                      rivalVehicle.cargoAmount
+                    )} / ${formatNumber(rivalVehicle.capacity)}`
+                  : VEHICLE_STATE_LABELS_NO[rivalVehicle.state]}
+              </strong>{' '}
+              ({Math.round(rivalVehicle.speedKmh)} / {rivalVehicle.maxSpeedKmh}{' '}
+              km/t)
+            </div>
+            <div>
+              Resultat i år:{' '}
+              <strong
+                className={
+                  rivalVehicle.profitThisYear >= 0
+                    ? 'text-emerald-300'
+                    : 'text-rose-400'
+                }
+              >
+                {formatKr(rivalVehicle.profitThisYear, true)}
+              </strong>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] ttd-num">
+              <span>
+                Last om bord:{' '}
+                <strong className="text-amber-200">
+                  {CARGO_LABELS_NO[rivalVehicle.cargoType]}
+                </strong>
+              </span>
+              <span className="ttd-gold font-bold">
+                {formatNumber(rivalVehicle.cargoAmount)} /{' '}
+                {formatNumber(rivalVehicle.capacity)}{' '}
+                {CARGO_UNITS_NO[rivalVehicle.cargoType]}
+              </span>
+            </div>
+            <div className="ttd-inset h-3.5 w-full overflow-hidden p-0.5">
+              <div
+                className="h-full transition-all duration-150"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    rivalVehicle.capacity > 0
+                      ? (rivalVehicle.cargoAmount / rivalVehicle.capacity) * 100
+                      : 0
+                  )}%`,
+                  backgroundColor: CARGO_COLORS[rivalVehicle.cargoType],
+                }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Read-Only Route Stops */}
+        <div className="ttd-panel p-2 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-amber-200 text-xs">
+              Kjøreordre ({rivalVehicle.orders.length} stopp — kun visning)
+            </span>
+            <span className="text-[10px] text-slate-300">
+              Klikk stasjon for detaljer
+            </span>
+          </div>
+
+          <div className="ttd-inset divide-y divide-slate-800 max-h-40 overflow-y-auto">
+            {rivalVehicle.orders.length === 0 ? (
+              <div className="p-3 text-center text-slate-400 text-[11px]">
+                Ingen stasjoner i ruten.
+              </div>
+            ) : (
+              rivalVehicle.orders.map((stId, idx) => {
+                const st = state.stations.find((s) => s.id === stId);
+                const isCurrent =
+                  rivalVehicle.orders.length > 0 &&
+                  idx ===
+                    rivalVehicle.currentOrderIndex % rivalVehicle.orders.length;
+
+                return (
+                  <div
+                    key={`${stId}-${idx}`}
+                    onClick={() => {
+                      if (!st) return;
+                      if (onOpenStation) {
+                        onOpenStation(st.id);
+                      } else {
+                        onFocusTile(st.x, st.y);
+                      }
+                    }}
+                    className={`px-2 py-1.5 flex items-center justify-between gap-2 text-[11px] ${
+                      st ? 'cursor-pointer hover:bg-slate-800/70' : ''
+                    } ${isCurrent ? 'bg-emerald-950/45 text-emerald-200' : ''}`}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-bold text-amber-300 w-5 ttd-num">
+                        {isCurrent ? '▶' : `${idx + 1}.`}
+                      </span>
+                      <span className="font-semibold truncate">
+                        {st ? st.name : `Slettet stasjon (${stId})`}
+                      </span>
+                      {st && (
+                        <span className="text-[10px] text-slate-400">
+                          ({STATION_KIND_LABELS_NO[st.kind]})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {(playerDepots.length > 0 || playerVehicles.length > 0) && (
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => onSelectVehicle(null)}
+              className="ttd-btn !py-1 !px-2.5"
+            >
+              <Warehouse className="w-3.5 h-3.5 text-amber-300" />
+              <span>Bytt til eget depot</span>
+            </button>
+          </div>
+        )}
+      </TTDWindow>
+    );
+  }
 
   return (
     <TTDWindow

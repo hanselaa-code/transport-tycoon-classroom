@@ -13,6 +13,7 @@ import {
   GameState,
   ScenarioType,
   Station,
+  StationDetailsInfo,
   StationKind,
   TileInspectionInfo,
   ToolType,
@@ -31,6 +32,7 @@ import {
   calculateVehicleCapacity,
   calculateVehiclePurchaseCost,
   CARGO_LABELS_NO,
+  COMPANY_COLORS,
   createEmptyCargoRecord,
   createInitialRatingsRecord,
   formatGameDate,
@@ -48,6 +50,9 @@ import {
   distributePeriodicCargoOutput,
   doesStationAcceptCargo,
   doesStationCatchmentProduceCargo,
+  getStationAcceptedCargosWithSources,
+  getStationHQBonusPct,
+  getStationSuppliedCargos,
   payQuarterlyDividends,
   placeHQAtTile,
   pushNews,
@@ -58,6 +63,7 @@ import {
   seedInitialStationCargo,
   sellAICompanyShares,
   setOwnerGrossSalary,
+  updateStationRatings,
   upgradeCorporateHQ,
 } from './dualEconomy';
 import {
@@ -113,6 +119,8 @@ export class GameEngine {
       const saved = loadStateFromLocalStorage();
       if (saved) {
         this.state = saved;
+        updateStationRatings(this.state);
+        recomputeValuationsAndWarnings(this.state);
         return;
       }
     }
@@ -1528,9 +1536,9 @@ export class GameEngine {
         if (doesStationAcceptCargo(this.state, station, c).accepts) {
           acceptsSet.add(c);
         }
-        if (doesStationCatchmentProduceCargo(this.state, station, c)) {
-          producesSet.add(c);
-        }
+      }
+      for (const supplied of getStationSuppliedCargos(this.state, station)) {
+        producesSet.add(supplied);
       }
     } else if (industry) {
       for (const acc of industry.accepts) acceptsSet.add(acc);
@@ -1604,6 +1612,44 @@ export class GameEngine {
       accepts: Array.from(acceptsSet),
       produces: Array.from(producesSet),
       descriptionNo,
+    };
+  }
+
+  public getStationDetails(stationId: string): StationDetailsInfo | null {
+    const station = this.state.stations.find((s) => s.id === stationId);
+    if (!station) return null;
+
+    updateStationRatings(this.state);
+
+    const isPlayerOwned = station.ownerId === 'player';
+    const aiOwner = !isPlayerOwned
+      ? this.state.aiCompanies.find((c) => c.id === station.ownerId)
+      : undefined;
+
+    const ownerName = isPlayerOwned
+      ? this.state.corporate.companyName
+      : aiOwner?.name ?? 'Konkurrent AS';
+    const ownerColor = isPlayerOwned
+      ? COMPANY_COLORS.player
+      : aiOwner?.color ?? COMPANY_COLORS[station.ownerId] ?? '#dc2626';
+
+    const suppliedCargos = getStationSuppliedCargos(this.state, station);
+    const acceptedCargos = getStationAcceptedCargosWithSources(this.state, station);
+    const servicingVehicles = this.state.vehicles.filter((v) =>
+      v.orders.includes(station.id)
+    );
+    const hqBonusPct = getStationHQBonusPct(station, this.state.corporate);
+
+    return {
+      station,
+      ownerId: station.ownerId,
+      ownerName,
+      ownerColor,
+      isPlayerOwned,
+      suppliedCargos,
+      acceptedCargos,
+      servicingVehicles,
+      hqBonusPct,
     };
   }
 
@@ -1752,6 +1798,7 @@ export class GameEngine {
     }
     this.state = res.state;
     this.subTickCounter = 0;
+    updateStationRatings(this.state);
     recomputeValuationsAndWarnings(this.state);
     this.emit();
     return { ok: true, message: 'Lagret spill ble lastet inn!' };
@@ -1770,6 +1817,7 @@ export class GameEngine {
     if (!loaded) return false;
     this.state = loaded;
     this.subTickCounter = 0;
+    updateStationRatings(this.state);
     recomputeValuationsAndWarnings(this.state);
     this.emit();
     return true;

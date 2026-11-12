@@ -26,6 +26,8 @@ import {
   VEHICLE_CATALOG,
   createGameEngine,
   getStationHQBonusPct,
+  getStationSuppliedCargos,
+  isCargoCompatibleWithStationKind,
   isTileTraversableForNetwork,
   tileIndex,
 } from '../src/core';
@@ -1005,6 +1007,184 @@ async function main(): Promise<void> {
   vehicleRenderer.dispose();
 
   console.log('  [OK] TerrainInstancer, StructuresRenderer & VehicleRenderer synced, animated & disposed cleanly.');
+
+  // =========================================================================
+  // 9. Round 4 Station Supplied Cargos, Clean Zero Ratings & Rival AI Inspection
+  // =========================================================================
+  section('9. Round 4 Station Supplied Cargos, Clean Zero Ratings & Rival AI getStationDetails QA');
+
+  // 9a. StationKind <-> CargoType compatibility rules
+  assert(
+    isCargoCompatibleWithStationKind('BUS_STOP', 'PASSENGERS'),
+    'BUS_STOP is compatible with PASSENGERS'
+  );
+  for (const freightCargo of ['MAIL', 'COAL', 'WOOD', 'GRAIN', 'GOODS', 'FOOD'] as const) {
+    assert(
+      !isCargoCompatibleWithStationKind('BUS_STOP', freightCargo),
+      `BUS_STOP excludes irrelevant cargo ${freightCargo}`
+    );
+    assert(
+      isCargoCompatibleWithStationKind('TRUCK_BAY', freightCargo),
+      `TRUCK_BAY is compatible with freight cargo ${freightCargo}`
+    );
+  }
+  assert(
+    !isCargoCompatibleWithStationKind('TRUCK_BAY', 'PASSENGERS'),
+    'TRUCK_BAY excludes PASSENGERS'
+  );
+  for (const anyCargo of ALL_CARGO_TYPES) {
+    assert(
+      isCargoCompatibleWithStationKind('TRAIN_STATION', anyCargo),
+      `TRAIN_STATION is compatible with ${anyCargo}`
+    );
+  }
+
+  // 9b. Player BUS_STOP & TRUCK_BAY station details + clean zero ratings on un-supplied cargos
+  assertEq(
+    transportEngine.getStationDetails('non-existent-station-id'),
+    null,
+    'getStationDetails returns null for unknown stationId'
+  );
+
+  const r4TransportState = transportEngine.getState();
+  const playerBusStop = r4TransportState.stations.find(
+    (st) => st.ownerId === 'player' && st.kind === 'BUS_STOP' && st.townId !== null
+  );
+  assert(Boolean(playerBusStop), 'Found player town BUS_STOP on transportEngine');
+
+  const busSupplied = getStationSuppliedCargos(r4TransportState, playerBusStop!);
+  assertEq(busSupplied.length, 1, 'Town BUS_STOP supplies exactly 1 cargo type');
+  assertEq(busSupplied[0], 'PASSENGERS', 'Town BUS_STOP supplied cargo is PASSENGERS');
+
+  const playerBusDetails = transportEngine.getStationDetails(playerBusStop!.id);
+  assert(playerBusDetails !== null, 'getStationDetails returned details for player BUS_STOP');
+  assertEq(playerBusDetails.isPlayerOwned, true, 'Player BUS_STOP isPlayerOwned === true');
+  assertEq(playerBusDetails.ownerId, 'player', 'Player BUS_STOP ownerId === player');
+  assertEq(
+    playerBusDetails.ownerName,
+    r4TransportState.corporate.companyName,
+    'Player BUS_STOP ownerName matches corporate.companyName'
+  );
+  assertEq(playerBusDetails.suppliedCargos.length, 1, 'Player BUS_STOP details suppliedCargos length === 1');
+  assertEq(playerBusDetails.suppliedCargos[0], 'PASSENGERS', 'Player BUS_STOP details suppliedCargos[0] === PASSENGERS');
+  assert(
+    playerBusDetails.acceptedCargos.some((a) => a.cargo === 'PASSENGERS' && a.sourceName.length > 0),
+    'Player BUS_STOP acceptedCargos lists PASSENGERS with town sourceName'
+  );
+  assert(
+    playerBusDetails.servicingVehicles.length > 0,
+    'Player BUS_STOP lists servicing bus vehicles'
+  );
+  assert(
+    playerBusDetails.station.ratings.PASSENGERS > 0,
+    `Player BUS_STOP has positive PASSENGERS rating (${playerBusDetails.station.ratings.PASSENGERS}%)`
+  );
+  for (const nonBusCargo of ['COAL', 'WOOD', 'GRAIN', 'GOODS', 'FOOD', 'MAIL'] as const) {
+    assertEq(
+      playerBusDetails.station.ratings[nonBusCargo],
+      0,
+      `Player BUS_STOP has clean 0 rating on un-supplied cargo ${nonBusCargo}`
+    );
+  }
+
+  const playerWoodTruckBay = r4TransportState.stations.find(
+    (st) =>
+      st.ownerId === 'player' &&
+      st.kind === 'TRUCK_BAY' &&
+      getStationSuppliedCargos(r4TransportState, st).includes('WOOD')
+  );
+  assert(Boolean(playerWoodTruckBay), 'Found player forest WOOD TRUCK_BAY on transportEngine');
+  const playerTruckDetails = transportEngine.getStationDetails(playerWoodTruckBay!.id);
+  assert(playerTruckDetails !== null, 'getStationDetails returned details for player WOOD TRUCK_BAY');
+  assert(
+    !playerTruckDetails.suppliedCargos.includes('PASSENGERS'),
+    'Player TRUCK_BAY suppliedCargos excludes PASSENGERS'
+  );
+  assertEq(
+    playerTruckDetails.station.ratings.PASSENGERS,
+    0,
+    'Player TRUCK_BAY has 0 PASSENGERS rating'
+  );
+  for (const cargo of ALL_CARGO_TYPES) {
+    if (playerTruckDetails.suppliedCargos.includes(cargo)) {
+      assert(
+        playerTruckDetails.station.ratings[cargo] > 0,
+        `Player TRUCK_BAY supplied cargo ${cargo} has positive rating`
+      );
+    } else {
+      assertEq(
+        playerTruckDetails.station.ratings[cargo],
+        0,
+        `Player TRUCK_BAY un-supplied cargo ${cargo} has 0 rating`
+      );
+    }
+  }
+
+  // 9c. Rival AI Competitor stations inspection via getStationDetails
+  const r4AiState = aiEngine.getState();
+  const aiStations = r4AiState.stations.filter((st) => st.ownerId !== 'player');
+  assert(
+    aiStations.length >= 2,
+    `Rival AI companies built inspectable stations (found ${aiStations.length})`
+  );
+
+  let aiStationsWithVehicles = 0;
+  for (const aiSt of aiStations) {
+    const aiDetails = aiEngine.getStationDetails(aiSt.id);
+    assert(aiDetails !== null, `getStationDetails returned details for rival station ${aiSt.id}`);
+    assertEq(aiDetails.isPlayerOwned, false, `Rival station ${aiSt.name} has isPlayerOwned === false`);
+    assertEq(aiDetails.ownerId, aiSt.ownerId, `Rival station ${aiSt.name} preserves AI ownerId`);
+    const matchingAiCompany = r4AiState.aiCompanies.find((c) => c.id === aiSt.ownerId);
+    assert(Boolean(matchingAiCompany), `Rival station ${aiSt.name} owner exists in aiCompanies`);
+    assertEq(
+      aiDetails.ownerName,
+      matchingAiCompany!.name,
+      `Rival station ${aiSt.name} ownerName matches AI company name (${matchingAiCompany!.name})`
+    );
+    assert(
+      aiDetails.ownerColor.startsWith('#'),
+      `Rival station ${aiSt.name} has valid hex ownerColor (${aiDetails.ownerColor})`
+    );
+    assertEq(
+      aiDetails.hqBonusPct,
+      0,
+      `Rival station ${aiSt.name} does not receive player HQ bonus`
+    );
+
+    if (aiDetails.servicingVehicles.length > 0) {
+      aiStationsWithVehicles++;
+      for (const rv of aiDetails.servicingVehicles) {
+        assertEq(
+          rv.ownerId,
+          aiSt.ownerId,
+          `Servicing vehicle ${rv.name} at rival station belongs to ${aiSt.ownerId}`
+        );
+      }
+    }
+
+    for (const cargo of ALL_CARGO_TYPES) {
+      if (aiDetails.suppliedCargos.includes(cargo)) {
+        assert(
+          aiDetails.station.ratings[cargo] > 0,
+          `Rival station ${aiSt.name} supplied cargo ${cargo} has positive rating`
+        );
+      } else {
+        assertEq(
+          aiDetails.station.ratings[cargo],
+          0,
+          `Rival station ${aiSt.name} un-supplied cargo ${cargo} has 0 rating`
+        );
+      }
+    }
+  }
+  assert(
+    aiStationsWithVehicles > 0,
+    `At least one rival AI station has active servicing vehicles (${aiStationsWithVehicles}/${aiStations.length})`
+  );
+
+  console.log(
+    `  [OK] Verified getStationSuppliedCargos, 0-rating cleanup & getStationDetails across player + ${aiStations.length} rival AI stations.`
+  );
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }
 

@@ -48,6 +48,9 @@ export {
   getStationHQBonusPct,
   doesStationAcceptCargo,
   doesStationCatchmentProduceCargo,
+  isCargoCompatibleWithStationKind,
+  getStationSuppliedCargos,
+  getStationAcceptedCargosWithSources,
 } from './dualEconomy';
 
 export {
@@ -97,5 +100,6 @@ export type {
   ActionResult,
   BuyVehicleParams,
   TileInspectionInfo,
+  StationDetailsInfo,
   GameState,
 } from '../types/game';
