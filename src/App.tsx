@@ -27,6 +27,7 @@ import { StockMarketWindow } from './ui/windows/StockMarketWindow';
 import { ClassroomWindow } from './ui/windows/ClassroomWindow';
 import { SaveLoadWindow } from './ui/windows/SaveLoadWindow';
 import { QuickTestWindow } from './ui/windows/QuickTestWindow';
+import { LandInfoWindow } from './ui/windows/LandInfoWindow';
 import { formatGameDate } from './ui/formatters';
 
 const STUDENT_ID_KEY = 'tt_classroom_student_id_v1';
@@ -77,6 +78,11 @@ export const App: React.FC = () => {
 
   // Viewport & Tool state
   const [activeTool, setActiveTool] = useState<ToolType>('SELECT');
+  const [isQueryLandActive, setIsQueryLandActive] = useState<boolean>(false);
+  const [landInfoCoords, setLandInfoCoords] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [stationLength, setStationLength] = useState<number>(2);
   const [mapRotation, setMapRotation] = useState<number>(0);
   const [zoomCommand, setZoomCommand] = useState<{
@@ -246,11 +252,18 @@ export const App: React.FC = () => {
   const handleSelectTool = useCallback((tool: ToolType) => {
     if (tool !== 'SELECT') {
       setPickingOrdersForVehicleId(null);
+      setIsQueryLandActive(false);
     }
     setActiveTool(tool);
   }, []);
 
-  // Multi-tile train station & newly placed depot helper
+  const handleToggleQueryLand = useCallback(() => {
+    setPickingOrdersForVehicleId(null);
+    setActiveTool('SELECT');
+    setIsQueryLandActive((prev) => !prev);
+  }, []);
+
+  // Multi-tile train station, newly placed depot, and [?] Land Area Info helper
   const handleTileInteract = useCallback(
     (x: number, y: number, tile: Tile) => {
       if (
@@ -284,9 +297,22 @@ export const App: React.FC = () => {
             engine.applyTool(nx, ny, 'TRAIN_STATION');
           }
         }
+        return;
+      }
+
+      // Classic TTD Land Area Information popup in SELECT / [?] inspect mode
+      if (activeTool === 'SELECT') {
+        const isStationOrDepot =
+          Boolean(tile.stationId) ||
+          tile.depot === 'ROAD' ||
+          tile.depot === 'RAIL';
+        if (isQueryLandActive || !isStationOrDepot) {
+          setLandInfoCoords({ x, y });
+          openWindow('land_info');
+        }
       }
     },
-    [activeTool, stationLength, engine, openWindow]
+    [activeTool, isQueryLandActive, stationLength, engine, openWindow]
   );
 
   // Map entity click handlers
@@ -450,7 +476,7 @@ export const App: React.FC = () => {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#0e171d] select-none">
       {/* 3D Isometric Game World */}
-      <div className="absolute inset-0 top-9 bottom-9">
+      <div className="absolute inset-0 top-[36px] bottom-[32px]">
         <IsometricViewport
           engine={engine}
           state={state}
@@ -470,6 +496,7 @@ export const App: React.FC = () => {
       <TopToolbar
         speed={state.speed}
         activeTool={activeTool}
+        isQueryLandActive={isQueryLandActive}
         openWindows={openWindows}
         playerVehicleCount={playerVehicleCount}
         hqTier={state.corporate.hqTier}
@@ -483,12 +510,13 @@ export const App: React.FC = () => {
         onZoomOut={handleZoomOut}
         onRotateMap={handleRotateMap}
         onSelectTool={handleSelectTool}
+        onToggleQueryLand={handleToggleQueryLand}
         onToggleWindow={toggleWindow}
       />
 
       {/* Auto-load Resume Banner with "Start Fresh" button */}
       {showResumeBanner && (
-        <div className="fixed top-22 2xl:top-12 left-1/2 -translate-x-1/2 z-[850] ttd-window px-3 py-1.5 flex items-center gap-3 text-xs">
+        <div className="fixed top-11 left-1/2 -translate-x-1/2 z-[850] ttd-window px-3 py-1.5 flex items-center gap-3 text-xs">
           <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
           <span>
             Lastet automatisk lagret spill (<strong>{state.corporate.companyName}</strong>,{' '}
@@ -679,6 +707,21 @@ export const App: React.FC = () => {
         />
       )}
 
+      {openWindows.has('land_info') && landInfoCoords && (
+        <LandInfoWindow
+          engine={engine}
+          state={state}
+          coords={landInfoCoords}
+          zIndex={getZIndex('land_info')}
+          onFocus={bringToFront}
+          onClose={(id) => {
+            setIsQueryLandActive(false);
+            closeWindow(id);
+          }}
+          onFocusTile={handleFocusTile}
+        />
+      )}
+
       {/* Bottom TTD Status Bar */}
       <BottomStatusBar
         date={state.date}
@@ -687,11 +730,13 @@ export const App: React.FC = () => {
         personalCash={state.personal.cash}
         news={state.news}
         activeTool={activeTool}
+        isQueryLandActive={isQueryLandActive}
         isPickingStationOrder={Boolean(pickingOrdersForVehicleId)}
         onOpenCompanyFinances={() => openWindow('company_finances')}
         onOpenPersonalFinances={() => openWindow('personal_finances')}
         onCancelTool={() => {
           setPickingOrdersForVehicleId(null);
+          setIsQueryLandActive(false);
           setActiveTool('SELECT');
         }}
       />

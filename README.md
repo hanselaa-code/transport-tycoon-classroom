@@ -1,13 +1,17 @@
 # Transport Tycoon: Classroom Edition
 
-Et norsk undervisningsspill inspirert av OpenTTD for bedriftsøkonomi, logistikk, skatt og aksjemarked i klasserommet.
+Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / OpenTTD** for bedriftsøkonomi, logistikk, skatt og aksjemarked i klasserommet.
 
 - **Live Web App (Firebase Hosting)**: [https://tt-classroom-ed-2026.web.app](https://tt-classroom-ed-2026.web.app)
 - **GitHub Repository**: [https://github.com/hanselaa-code/transport-tycoon-classroom](https://github.com/hanselaa-code/transport-tycoon-classroom)
 
 ## Nøkkelfunksjoner
-- **3D Voxel Isometrisk Kart** (`Three.js` `OrthographicCamera`) med terrenghøyder, kyst/fjord, 8 norske byer, primær- og sekundærindustrier (`COAL_MINE -> POWER_PLANT`, `FOREST -> SAWMILL -> GOODS`, `FARM -> FOOD_PLANT -> FOOD`).
-- **Transportnettverk**: Jernbane med blokksignaler, veitransport, busser og varelevering basert på autentiske OpenTTD C++-formler for fraktbetaling, stigningsmotstand og stasjonsvurdering.
+- **Kontinuerlig TTD 3D Høydefelt & Isometrisk Kart** (`Three.js` `OrthographicCamera`):
+  - Vanntett fasettert terrengmesh med klassisk Chris Sawyer solskyggelegging, kystlinjer, støttemurer på skrå tomter og 3D-veifyllinger/jernbaneballast uten glipper over bakketopper og daler.
+  - 8 norske byer og 14 primær-/sekundærindustrier (`COAL_MINE -> POWER_PLANT`, `FOREST -> SAWMILL -> GOODS`, `FARM -> FOOD_PLANT -> FOOD`), samt klassisk **`[?]` Landinformasjon**-verktøy.
+- **Autentisk OpenTTD Transportøkonomi & Tempo**:
+  - Realistiske TTD-hastigheter (`56 km/h` buss, `54 km/h` lastebil, `88–175 km/h` lokomotiver), gradvis lasting på stasjoner, **`Full last`**-ordrevalg, blokksignaler på jernbane og stasjonsfangst basert på faktisk bybebyggelse innenfor dekningsradius (alle nye stasjoner starter med `0` ventende passasjerer/last).
+  - Kalibrerte OpenTTD C++-fraktformler (`_default_cargo`) med avstandsbetaling, tidsforfall (`days1`/`days2`) og stigningsmotstand.
 - **Delt økonomi (Selskap AS vs. Privatøkonomi)**:
   - Selskapet starter med `2 000 000 kr` i kontanter og lån (justerbart i trinn på `100 000 kr`), likviditetsvarsel ved negativ kassebeholdning og resultatregnskap (P&L).
   - Månedlig eierlønn trekker bruttolønn + `14,1 %` arbeidsgiveravgift fra selskapet, beregner progressiv personskatt (`20 %` / `30 %` / `42 %`) og utbetaler nettolønn til eierens privatkonto.
@@ -20,7 +24,7 @@ Et norsk undervisningsspill inspirert av OpenTTD for bedriftsøkonomi, logistikk
 ```bash
 npm install
 npm run dev      # Start lokal utviklingsserver (Vite)
-npm run verify   # Kjør hodeløs simulerings- og formelverifisering (tsx scripts/verify-sim.ts)
+npm run verify   # Kjør hodeløs simulerings- og høydefeltsverifisering (42 241 sjekker)
 npm run build    # TypeScript-sjekk og produksjonsbygg (tsc -b && vite build)
 ```
 

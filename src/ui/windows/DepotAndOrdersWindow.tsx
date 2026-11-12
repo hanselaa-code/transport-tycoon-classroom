@@ -11,6 +11,7 @@ import {
   ArrowUp,
   ArrowDown,
   ShoppingCart,
+  PackageCheck,
 } from 'lucide-react';
 import type {
   CargoType,
@@ -230,6 +231,16 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
     const res = engine.toggleVehicleStopped(activeVehicle.id);
     if (!res.ok && res.message) {
       setFeedback({ ok: false, msg: res.message });
+    } else {
+      setFeedback(null);
+    }
+  };
+
+  const handleToggleFullLoad = () => {
+    if (!activeVehicle) return;
+    const res = engine.toggleVehicleFullLoad(activeVehicle.id);
+    if (res.message) {
+      setFeedback({ ok: res.ok, msg: res.message });
     } else {
       setFeedback(null);
     }
@@ -557,6 +568,7 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                 <>
                   {/* Status, Cargo Load Bar & Profit This Year */}
                   <div className="ttd-panel p-2 space-y-2">
+                    {/* Status, Cargo Load Bar & Profit This Year */}
                     <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] ttd-num">
                       <div>
                         Status:{' '}
@@ -565,10 +577,16 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                             activeVehicle.state === 'STOPPED' ||
                             activeVehicle.state === 'IN_DEPOT'
                               ? 'text-amber-300'
+                              : activeVehicle.state === 'LOADING'
+                              ? 'ttd-gold'
                               : 'text-emerald-300'
                           }
                         >
-                          {VEHICLE_STATE_LABELS_NO[activeVehicle.state]}
+                          {activeVehicle.state === 'LOADING'
+                            ? `Laster: ${formatNumber(activeVehicle.cargoAmount)} / ${formatNumber(
+                                activeVehicle.capacity
+                              )}`
+                            : VEHICLE_STATE_LABELS_NO[activeVehicle.state]}
                         </strong>{' '}
                         ({Math.round(activeVehicle.speedKmh)} / {activeVehicle.maxSpeedKmh} km/t)
                       </div>
@@ -590,12 +608,25 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                     <div className="space-y-1">
                       <div className="flex items-center justify-between text-[11px] ttd-num">
                         <span>
-                          Last om bord:{' '}
-                          <strong className="text-amber-200">
-                            {CARGO_LABELS_NO[activeVehicle.cargoType]}
-                          </strong>
+                          {activeVehicle.state === 'LOADING' ? (
+                            <strong className="ttd-gold">
+                              Laster gradvis ({CARGO_LABELS_NO[activeVehicle.cargoType]}):
+                            </strong>
+                          ) : (
+                            <>
+                              Last om bord:{' '}
+                              <strong className="text-amber-200">
+                                {CARGO_LABELS_NO[activeVehicle.cargoType]}
+                              </strong>
+                            </>
+                          )}
+                          {activeVehicle.waitForFullLoad && (
+                            <span className="ml-1.5 px-1 py-0.2 bg-amber-950/90 border border-amber-500/70 text-amber-200 text-[10px] font-bold">
+                              FULL LAST
+                            </span>
+                          )}
                         </span>
-                        <span>
+                        <span className="ttd-gold font-bold">
                           {formatNumber(activeVehicle.cargoAmount)} /{' '}
                           {formatNumber(activeVehicle.capacity)}{' '}
                           {CARGO_UNITS_NO[activeVehicle.cargoType]}
@@ -603,7 +634,7 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                       </div>
                       <div className="ttd-inset h-3.5 w-full overflow-hidden p-0.5">
                         <div
-                          className="h-full transition-all duration-200"
+                          className="h-full transition-all duration-150"
                           style={{
                             width: `${Math.min(
                               100,
@@ -641,28 +672,43 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
 
                   {/* Orders List */}
                   <div className="ttd-panel p-2 space-y-2">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-1.5">
                       <span className="font-bold text-amber-200 text-xs">
                         Kjøreordre ({activeVehicle.orders.length} stopp)
                       </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onToggleStationPicker(
-                            isPickingStationOrder ? null : activeVehicle.id
-                          )
-                        }
-                        className={`ttd-btn ttd-btn-brass !py-1 ${
-                          isPickingStationOrder ? 'ttd-btn-active' : ''
-                        }`}
-                      >
-                        <Crosshair className="w-3.5 h-3.5" />
-                        <span>
-                          {isPickingStationOrder
-                            ? 'Klikk stasjon på kartet... (Avslutt)'
-                            : 'Legg til stasjon (klikk på kart)'}
-                        </span>
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={handleToggleFullLoad}
+                          title="Klassisk OpenTTD «Full last» – vent ved lastestasjon til kjøretøyet er helt fullt!"
+                          className={`ttd-btn !py-1 ${
+                            activeVehicle.waitForFullLoad ? 'ttd-btn-active' : ''
+                          }`}
+                        >
+                          <PackageCheck className="w-3.5 h-3.5 text-amber-300" />
+                          <span>
+                            Full last ({activeVehicle.waitForFullLoad ? 'PÅ' : 'AV'})
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onToggleStationPicker(
+                              isPickingStationOrder ? null : activeVehicle.id
+                            )
+                          }
+                          className={`ttd-btn ttd-btn-brass !py-1 ${
+                            isPickingStationOrder ? 'ttd-btn-active' : ''
+                          }`}
+                        >
+                          <Crosshair className="w-3.5 h-3.5" />
+                          <span>
+                            {isPickingStationOrder
+                              ? 'Klikk stasjon... (Avslutt)'
+                              : 'Legg til stasjon'}
+                          </span>
+                        </button>
+                      </div>
                     </div>
 
                     {/* Ordered Stops */}

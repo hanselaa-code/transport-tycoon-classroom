@@ -160,7 +160,10 @@ export const VehiclesListWindow: React.FC<VehiclesListWindowProps> = ({
                             : 'text-emerald-300'
                         }`}
                       >
-                        {VEHICLE_STATE_LABELS_NO[v.state]} ({Math.round(v.speedKmh)} km/t)
+                        {v.state === 'LOADING'
+                          ? `Laster: ${formatNumber(v.cargoAmount)} / ${formatNumber(v.capacity)}`
+                          : `${VEHICLE_STATE_LABELS_NO[v.state]} (${Math.round(v.speedKmh)} km/t)`}
+                        {v.waitForFullLoad ? ' • [Full last]' : ''}
                       </span>
                       <span className="text-slate-400 text-[10px]">
                         {getDestinationName(v)}

@@ -113,11 +113,21 @@ function findClearTileNearIndustry(
       const t = state.tiles[tileIndex(tx, ty, state.mapSize)];
       if (!isTileClearForStructure(t)) continue;
 
+      // Guarantee within 3-tile Chebyshev catchment of at least one tile of the industry
+      let minCheb = Infinity;
+      for (let iy = 0; iy < ind.height; iy++) {
+        for (let ix = 0; ix < ind.width; ix++) {
+          const cheb = Math.max(Math.abs(tx - (ind.x + ix)), Math.abs(ty - (ind.y + iy)));
+          if (cheb < minCheb) minCheb = cheb;
+        }
+      }
+      if (minCheb > 3) continue;
+
       const distToCenter = Math.hypot(
         tx - (ind.x + 0.5),
         ty - (ind.y + 0.5)
       );
-      if (distToCenter >= 1.4 && distToCenter <= 3.8) {
+      if (distToCenter >= 1.2) {
         candidates.push({ x: tx, y: ty, dist: distToCenter });
       }
     }
@@ -243,7 +253,7 @@ function placeStationRecord(
     waitingCargo: createEmptyCargoRecord(),
     ratings: createInitialRatingsRecord(),
     daysSincePickup: 0,
-    lastVehicleMaxSpeedKmh: kind === 'TRAIN_STATION' ? 95 : 75,
+    lastVehicleMaxSpeedKmh: kind === 'TRAIN_STATION' ? 88 : 56,
   };
 
   refreshStationCatchment(state, station);
@@ -325,7 +335,10 @@ function createSpawnedVehicle(
     trail: [{ x: startPt.x, y: startPt.y }],
     depotX: depotPt.x,
     depotY: depotPt.y,
-    loadingTicksRemaining: initialState === 'LOADING' ? 1 : 0,
+    loadingTicksRemaining: initialState === 'LOADING' ? 5 : 0,
+    waitForFullLoad: false,
+    accelTicks: 0,
+    fullLoadWaitTicks: 0,
   };
 
   state.vehicles.push(vehicle);
@@ -549,7 +562,7 @@ export function buildConnectedRoute(
 
     const v2Ids: string[] = [v1.id];
     if (secondCorridor.length >= 3 || routeType === 'coal_rail') {
-      const v2Start = depotPt;
+      const v2Start = secondCorridor.length >= 3 ? ptB : depotPt;
       const v2 = createSpawnedVehicle(
         state,
         ownerId,
@@ -559,8 +572,8 @@ export function buildConnectedRoute(
         v2Start,
         depotPt,
         orders,
-        1,
-        'MOVING'
+        secondCorridor.length >= 3 ? 1 : 1,
+        secondCorridor.length >= 3 ? 'LOADING' : 'MOVING'
       );
       v2Ids.push(v2.id);
     }
@@ -716,11 +729,11 @@ export function buildConnectedRoute(
       'TRUCK_CARGO',
       cargo,
       0,
-      depotPt,
+      ptB,
       depotPt,
       orders,
-      0,
-      'MOVING'
+      1,
+      'LOADING'
     );
 
     const buildCost = roadBuilt * 2_500 + 2 * 30_000 + 35_000;

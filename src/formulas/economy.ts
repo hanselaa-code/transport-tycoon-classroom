@@ -20,7 +20,7 @@ export type FormulaCargoType =
 export interface CargoSpec {
   cargo: FormulaCargoType;
   labelNo: string;
-  /** Calibrated so typical classroom routes earn ~5 000 - 85 000 kr per delivery */
+  /** Calibrated OpenTTD commodity base rate in kr per unit-tile (modest bus fares, strong industrial long-haul freight) */
   baseRateKr: number;
   /** OpenTTD early decay threshold (in transit days) */
   days1: number;
@@ -43,7 +43,8 @@ export const OPENTTD_INITIAL_STATION_RATING = 175; // ~69%
 
 /**
  * Calibrated cargo table mapping OpenTTD `_default_cargo` (`src/table/cargo_const.h:57-100`)
- * `initial_payment` (scaled by ~0.00314 kr/unit) and `transit_periods` into Norwegian Kroner (kr).
+ * commodity tiers and `transit_periods` into Norwegian Kroner (kr), keeping municipal/intercity
+ * passenger & mail fares modest while rewarding bulk/express industrial chains.
  *
  * Reference OpenTTD `_default_cargo` entries:
  * - CT_PASSENGERS: ip=3185, td1=0,  td2=24, TownAcceptanceEffect::Passengers
@@ -58,7 +59,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   PASSENGERS: {
     cargo: 'PASSENGERS',
     labelNo: 'Passasjerer',
-    baseRateKr: 10.0,
+    baseRateKr: 3.2,
     days1: 3,
     days2: 24,
     isTimeSensitive: true,
@@ -66,7 +67,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   MAIL: {
     cargo: 'MAIL',
     labelNo: 'Post',
-    baseRateKr: 14.5,
+    baseRateKr: 5.2,
     days1: 15,
     days2: 75,
     isTimeSensitive: true,
@@ -74,7 +75,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   COAL: {
     cargo: 'COAL',
     labelNo: 'Kull',
-    baseRateKr: 18.5,
+    baseRateKr: 11.5,
     days1: 18,
     days2: 255,
     isTimeSensitive: false,
@@ -82,7 +83,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   WOOD: {
     cargo: 'WOOD',
     labelNo: 'Tømmer',
-    baseRateKr: 16.0,
+    baseRateKr: 10.2,
     days1: 35,
     days2: 255,
     isTimeSensitive: false,
@@ -90,7 +91,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   GOODS: {
     cargo: 'GOODS',
     labelNo: 'Varer',
-    baseRateKr: 19.5,
+    baseRateKr: 13.5,
     days1: 12,
     days2: 45,
     isTimeSensitive: true,
@@ -98,7 +99,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   GRAIN: {
     cargo: 'GRAIN',
     labelNo: 'Korn',
-    baseRateKr: 15.0,
+    baseRateKr: 9.8,
     days1: 10,
     days2: 50,
     isTimeSensitive: true,
@@ -106,7 +107,7 @@ export const CARGO_SPECS: Record<FormulaCargoType, CargoSpec> = {
   FOOD: {
     cargo: 'FOOD',
     labelNo: 'Matvarer',
-    baseRateKr: 18.0,
+    baseRateKr: 12.2,
     days1: 4,
     days2: 30,
     isTimeSensitive: true,

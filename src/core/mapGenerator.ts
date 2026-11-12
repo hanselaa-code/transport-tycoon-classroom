@@ -254,8 +254,8 @@ export function generateWorld(
       y: bestY,
       population: initialPop,
       growthCounter: 0,
-      monthlyPassengers: Math.max(25, Math.round(initialPop * 0.14)),
-      monthlyMail: Math.max(12, Math.round(initialPop * 0.06)),
+      monthlyPassengers: Math.max(14, Math.round(initialPop * 0.06)),
+      monthlyMail: Math.max(6, Math.round(initialPop * 0.025)),
       servicedStations: 0,
       deliveredPassengersThisMonth: 0,
       deliveredMailThisMonth: 0,
@@ -428,7 +428,7 @@ export function generateWorld(
       produces: bp.produces,
       accepts: [...bp.accepts],
       monthlyProduction: monthlyProd,
-      storedOutput: monthlyProd > 0 ? Math.round(monthlyProd * 0.45) : 0,
+      storedOutput: 0,
     };
     industries.push(industry);
 

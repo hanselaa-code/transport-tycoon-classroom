@@ -23,6 +23,8 @@ export {
   INITIAL_MONTHLY_GROSS_SALARY_KR,
   MAX_MONTHLY_GROSS_SALARY_KR,
   STATION_CATCHMENT_RADIUS,
+  ROAD_STATION_CATCHMENT_RADIUS,
+  RAIL_STATION_CATCHMENT_RADIUS,
   HQ_BONUS_RADIUS,
   TOTAL_AI_SHARES,
   MAX_PLAYER_AI_SHARE_PCT,
@@ -33,6 +35,7 @@ export {
   calculateVehicleBaseAnnualCost,
   getHQTierSpec,
   getHQCumulativeValue,
+  getStationCatchmentRadius,
   createEmptyCargoRecord,
   createInitialRatingsRecord,
   formatNorwegianNumber,
@@ -44,6 +47,7 @@ export {
   calculatePnLOperatingProfit,
   getStationHQBonusPct,
   doesStationAcceptCargo,
+  doesStationCatchmentProduceCargo,
 } from './dualEconomy';
 
 export {
@@ -92,5 +96,6 @@ export type {
   GameDate,
   ActionResult,
   BuyVehicleParams,
+  TileInspectionInfo,
   GameState,
 } from '../types/game';

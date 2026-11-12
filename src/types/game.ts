@@ -147,6 +147,9 @@ export interface Vehicle {
   depotX?: number;
   depotY?: number;
   loadingTicksRemaining?: number;
+  waitForFullLoad?: boolean;
+  accelTicks?: number;
+  fullLoadWaitTicks?: number;
 }
 
 export interface FloatingPopup {
@@ -282,6 +285,37 @@ export interface BuyVehicleParams {
   cargoType?: CargoType;
   wagonCount?: number;
   orders?: string[];
+  waitForFullLoad?: boolean;
+}
+
+export interface TileInspectionInfo {
+  x: number;
+  y: number;
+  terrain: TerrainType;
+  terrainLabelNo: string;
+  elevation: number;
+  slopeLabelNo: string;
+  isSloped: boolean;
+  road: boolean;
+  rail: boolean;
+  signal: boolean;
+  depot: 'ROAD' | 'RAIL' | null;
+  hqTier: number | null;
+  ownerId: string | null;
+  ownerName: string;
+  townId: string | null;
+  townName: string | null;
+  buildingTier: number;
+  industryId: string | null;
+  industryName: string | null;
+  industryType: IndustryType | null;
+  stationId: string | null;
+  stationName: string | null;
+  stationKind: StationKind | null;
+  waitingCargo: Record<CargoType, number> | null;
+  accepts: CargoType[];
+  produces: CargoType[];
+  descriptionNo: string;
 }
 
 export interface GameState {

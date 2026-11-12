@@ -14,17 +14,27 @@ import {
   calculateTownGrowthDelta,
 } from '../src/formulas';
 import {
+  ALL_CARGO_TYPES,
   GameEngine,
   HQ_TIERS,
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
   LOAN_STEP_KR,
+  RAIL_STATION_CATCHMENT_RADIUS,
+  ROAD_STATION_CATCHMENT_RADIUS,
   TOTAL_AI_SHARES,
+  VEHICLE_CATALOG,
   createGameEngine,
   getStationHQBonusPct,
   isTileTraversableForNetwork,
   tileIndex,
 } from '../src/core';
+import {
+  WATER_SURFACE_Y,
+  getCornerHeight,
+  getSurfaceHeightAt,
+  getTileCornerHeights,
+} from '../src/renderer/IsoSceneManager';
 import { firebaseConfig, hasValidFirebaseConfig } from '../src/firebase/config';
 import {
   createClassroomSession,
@@ -59,12 +69,21 @@ function section(title: string): void {
 }
 
 async function main(): Promise<void> {
-  console.log('Starting Transport Tycoon: Classroom Edition Headless Verification...');
+  console.log('Starting Transport Tycoon: Classroom Edition Headless Verification (Round 2 TTD Edition)...');
 
   // =========================================================================
-  // 1. OpenTTD Cargo Payment & Formula Verification
+  // 1. OpenTTD Cargo Payment, Recalibrated Commodity Rates & Mechanics Formulas
   // =========================================================================
-  section('1. OpenTTD Cargo Payment & Mechanics Formulas');
+  section('1. OpenTTD Cargo Payment, Recalibrated TTD Rates & Mechanics Formulas');
+
+  // Verify authentic TTD relative commodity rates (Round 2 spec)
+  assertEq(CARGO_SPECS.PASSENGERS.baseRateKr, 3.2, 'PASSENGERS baseRateKr = 3.2 kr');
+  assertEq(CARGO_SPECS.MAIL.baseRateKr, 5.2, 'MAIL baseRateKr = 5.2 kr');
+  assertEq(CARGO_SPECS.GRAIN.baseRateKr, 9.8, 'GRAIN baseRateKr = 9.8 kr');
+  assertEq(CARGO_SPECS.WOOD.baseRateKr, 10.2, 'WOOD baseRateKr = 10.2 kr');
+  assertEq(CARGO_SPECS.COAL.baseRateKr, 11.5, 'COAL baseRateKr = 11.5 kr');
+  assertEq(CARGO_SPECS.FOOD.baseRateKr, 12.2, 'FOOD baseRateKr = 12.2 kr');
+  assertEq(CARGO_SPECS.GOODS.baseRateKr, 13.5, 'GOODS baseRateKr = 13.5 kr');
 
   // Distance monotonicity: higher distance -> strictly higher revenue
   const coalNear = calculateCargoPayment('COAL', 100, 10, 12);
@@ -73,6 +92,14 @@ async function main(): Promise<void> {
   assert(
     coalNear > 0 && coalMid > coalNear && coalFar > coalMid,
     `Cargo payment must increase with Manhattan distance (got ${coalNear} -> ${coalMid} -> ${coalFar})`
+  );
+
+  // Industrial bulk train delivery out-earns a short-hop bus delivery
+  const shortBusPayout = calculateCargoPayment('PASSENGERS', 32, 16, 8);
+  const longCoalTrainPayout = calculateCargoPayment('COAL', 96, 32, 14);
+  assert(
+    longCoalTrainPayout > shortBusPayout * 4,
+    `Long-haul coal train (${longCoalTrainPayout} kr) must strongly out-earn a single bus (${shortBusPayout} kr)`
   );
 
   // Transit time decay thresholds (days1 -> -1/day, days2 -> -2/day, floor 31/255)
@@ -153,12 +180,178 @@ async function main(): Promise<void> {
     'Company valuation floors at 1 kr when underwater'
   );
 
-  console.log('  [OK] OpenTTD cargo payment, decay floor (31/255), slopes, ratings & town growth verified.');
+  console.log('  [OK] Recalibrated TTD commodity rates, decay floor (31/255), slopes, ratings & town growth verified.');
 
   // =========================================================================
-  // 2. Dual Economy Separation, Loan, Liquidity Warning, Tax & HQ Tiers 1-5
+  // 2. Authentic TTD Catalog, Zero-Start Stations, Gradual Loading, Full Load & Land Info
   // =========================================================================
-  section('2. Dual Economy Separation, Progressive Tax & HQ Tiers 1-5');
+  section('2. TTD Vehicle Speeds, Zero-Start Stations, Gradual Loading, Full Load & Land Info');
+
+  assertEq(VEHICLE_CATALOG.BUS_CITY.maxSpeedKmh, 56, 'BUS_CITY realistic TTD speed = 56 km/h');
+  assertEq(VEHICLE_CATALOG.BUS_CITY.baseCapacity, 32, 'BUS_CITY capacity = 32 passengers');
+  assertEq(VEHICLE_CATALOG.BUS_CITY.price, 65_000, 'BUS_CITY price = 65 000 kr');
+  assertEq(VEHICLE_CATALOG.BUS_CITY.annualRunningCost, 13_200, 'BUS_CITY annual running cost = 13 200 kr');
+
+  assertEq(VEHICLE_CATALOG.TRUCK_CARGO.maxSpeedKmh, 54, 'TRUCK_CARGO speed = 54 km/h');
+  assertEq(VEHICLE_CATALOG.TRUCK_CARGO.baseCapacity, 25, 'TRUCK_CARGO capacity = 25 units');
+  assertEq(VEHICLE_CATALOG.LOCO_STEAM.maxSpeedKmh, 88, 'LOCO_STEAM speed = 88 km/h');
+  assertEq(VEHICLE_CATALOG.LOCO_DIESEL.maxSpeedKmh, 128, 'LOCO_DIESEL speed = 128 km/h');
+  assertEq(VEHICLE_CATALOG.LOCO_ELECTRIC.maxSpeedKmh, 175, 'LOCO_ELECTRIC speed = 175 km/h');
+
+  assertEq(ROAD_STATION_CATCHMENT_RADIUS, 3, 'Road station catchment radius = 3 tiles');
+  assertEq(RAIL_STATION_CATCHMENT_RADIUS, 4, 'Rail station catchment radius = 4 tiles');
+
+  const ttdEngine = createGameEngine({ scenario: 'standard', mapSize: 64, seed: 20261112 });
+  const ttdInit = ttdEngine.getState();
+  const testTown = ttdInit.towns[0];
+
+  // Place a fresh BUS_STOP adjacent to town[0] and verify STRICTLY 0 initial waiting cargo
+  let testStopPos: { x: number; y: number } | null = null;
+  let testDepotPos: { x: number; y: number } | null = null;
+  for (let dy = -3; dy <= 3 && !testStopPos; dy++) {
+    for (let dx = -3; dx <= 3 && !testStopPos; dx++) {
+      const tx = testTown.x + dx;
+      const ty = testTown.y + dy;
+      const t = ttdInit.tiles[tileIndex(tx, ty, ttdInit.mapSize)];
+      if (
+        t.terrain !== 'WATER' &&
+        !t.stationId &&
+        !t.depot &&
+        !t.industryId &&
+        (t.buildingTier ?? 0) === 0
+      ) {
+        const res = ttdEngine.applyTool(tx, ty, 'BUS_STOP');
+        if (res.ok) {
+          testStopPos = { x: tx, y: ty };
+        }
+      }
+    }
+  }
+  assert(testStopPos !== null, 'Built fresh town BUS_STOP');
+
+  const builtStop = ttdEngine.getState().stations[0];
+  for (const cargo of ALL_CARGO_TYPES) {
+    assertEq(
+      builtStop.waitingCargo[cargo],
+      0,
+      `Newly built station must start with 0 waiting ${cargo} (got ${builtStop.waitingCargo[cargo]})`
+    );
+  }
+
+  // Advance 5 game days and confirm passengers trickle in gradually (modest trickle, never instant flood)
+  ttdEngine.advanceDays(5);
+  const paxAfter5Days = ttdEngine.getState().stations[0].waitingCargo.PASSENGERS;
+  assert(
+    paxAfter5Days > 0 && paxAfter5Days <= 18,
+    `Town bus stop should accumulate a modest trickle after 5 days (got ${paxAfter5Days})`
+  );
+
+  // Verify Land Area Info (`inspectTile`)
+  const townInspect = ttdEngine.inspectTile(testTown.x, testTown.y);
+  assert(townInspect !== null, 'inspectTile returns non-null info for town center');
+  assert(
+    Boolean(townInspect.townName && townInspect.descriptionNo.length > 0),
+    'inspectTile includes townName and Norwegian description'
+  );
+  const stopInspect = ttdEngine.inspectTile(testStopPos.x, testStopPos.y);
+  assert(
+    Boolean(stopInspect?.stationName && stopInspect.accepts.includes('PASSENGERS')),
+    'inspectTile on bus stop reports stationName and PASSENGERS acceptance'
+  );
+
+  // Verify `toggleVehicleFullLoad` and gradual multi-tick loading
+  const curTiles = ttdEngine.getState().tiles;
+  for (const [ox, oy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ]) {
+    const nx = testStopPos.x + ox;
+    const ny = testStopPos.y + oy;
+    const nt = curTiles[tileIndex(nx, ny, 64)];
+    if (
+      nt &&
+      nt.terrain !== 'WATER' &&
+      !nt.stationId &&
+      !nt.depot &&
+      !nt.industryId &&
+      (nt.buildingTier ?? 0) === 0
+    ) {
+      const dr = ttdEngine.applyTool(nx, ny, 'ROAD_DEPOT');
+      if (dr.ok) {
+        testDepotPos = { x: nx, y: ny };
+        break;
+      }
+    }
+  }
+  assert(testDepotPos !== null, 'Built ROAD_DEPOT adjacent to BUS_STOP');
+
+  // Place a second stop a couple tiles away so the bus has 2 orders
+  let secondStopId: string | null = null;
+  for (let r = 2; r <= 5 && !secondStopId; r++) {
+    const sx = testStopPos.x + r;
+    const sy = testStopPos.y;
+    ttdEngine.applyDragTrackOrRoad(testStopPos.x, testStopPos.y, sx, sy, 'ROAD');
+    const sr = ttdEngine.applyTool(sx, sy, 'BUS_STOP');
+    if (sr.ok && sr.stationId && sr.stationId !== builtStop.id) {
+      secondStopId = sr.stationId;
+    }
+  }
+  assert(secondStopId !== null, 'Built second BUS_STOP for full-load test');
+
+  const busBuy = ttdEngine.buyVehicle({
+    depotX: testDepotPos.x,
+    depotY: testDepotPos.y,
+    modelId: 'BUS_CITY',
+    orders: [builtStop.id, secondStopId],
+  });
+  assert(busBuy.ok && Boolean(busBuy.vehicleId), 'Bought BUS_CITY in depot');
+
+  const fullLoadOn = ttdEngine.toggleVehicleFullLoad(busBuy.vehicleId!);
+  assert(fullLoadOn.ok, 'toggleVehicleFullLoad enables Full Load');
+  assertEq(
+    ttdEngine.getState().vehicles.find((v) => v.id === busBuy.vehicleId)!.waitForFullLoad,
+    true,
+    'vehicle.waitForFullLoad is true after toggle'
+  );
+  const fullLoadOff = ttdEngine.toggleVehicleFullLoad(busBuy.vehicleId!);
+  assert(fullLoadOff.ok, 'toggleVehicleFullLoad toggles Full Load off');
+  assertEq(
+    ttdEngine.getState().vehicles.find((v) => v.id === busBuy.vehicleId)!.waitForFullLoad,
+    false,
+    'vehicle.waitForFullLoad is false after second toggle'
+  );
+  // Re-enable Full Load and seed 20 passengers (< 32 capacity) on builtStop to test gradual loading + full-load hold
+  ttdEngine.toggleVehicleFullLoad(busBuy.vehicleId!);
+  ttdEngine.getState().stations.find((s) => s.id === builtStop.id)!.waitingCargo.PASSENGERS = 20;
+
+  let sawGradualPartialLoad = false;
+  let heldAtStationPastMinDwell = false;
+  let loadingTicksObserved = 0;
+
+  for (let t = 0; t < 40; t++) {
+    ttdEngine.tick(1);
+    const bus = ttdEngine.getState().vehicles.find((v) => v.id === busBuy.vehicleId)!;
+    if (bus.state === 'LOADING') {
+      loadingTicksObserved++;
+      if (bus.cargoAmount > 0 && bus.cargoAmount < 20) {
+        sawGradualPartialLoad = true;
+      }
+      if (loadingTicksObserved > 7 && bus.cargoAmount < bus.capacity) {
+        heldAtStationPastMinDwell = true;
+      }
+    }
+  }
+  assert(sawGradualPartialLoad, 'Vehicle loads cargo gradually across multiple subticks (not instant 1-tick)');
+  assert(heldAtStationPastMinDwell, 'Vehicle with waitForFullLoad waits at producing station when partially loaded');
+
+  console.log('  [OK] TTD vehicle speeds, 0-start stations, catchment trickle, gradual loading, Full Load & inspectTile verified.');
+
+  // =========================================================================
+  // 3. Dual Economy Separation, Loan, Liquidity Warning, Tax & HQ Tiers 1-5
+  // =========================================================================
+  section('3. Dual Economy Separation, Progressive Tax & HQ Tiers 1-5');
 
   // Verify exact 60 000 kr progressive tax example from spec
   const tax60k = calculateProgressiveTax(60_000);
@@ -229,7 +422,7 @@ async function main(): Promise<void> {
   );
 
   // Trigger liquidity warning when corporate.cash < 0
-  econEngine.advanceDays(30); // Another 68 460 kr deducted from remaining 31 540 kr -> -36 920 kr!
+  econEngine.advanceDays(30);
   st = econEngine.getState();
   assert(st.corporate.cash < 0, `Corporate cash should be negative (got ${st.corporate.cash})`);
   assertEq(
@@ -267,11 +460,9 @@ async function main(): Promise<void> {
   }
   assert(placedStationTile !== null, 'Placed player bus stop near town0 for HQ bonus check');
 
-  // Grant enough personal cash to buy all 5 HQ tiers (25k + 100k + 300k + 750k + 1800k = 2 975 000 kr)
   econEngine.grantDevFunds('personal', 3_500_000);
   const baseStationRating = econEngine.getState().stations[0].ratings.PASSENGERS;
 
-  // Place Tier 1 HQ via PLACE_HQ tool near town0, then upgrade Tiers 2..5
   let hqPlaced = false;
   st = econEngine.getState();
   for (let r = 2; r <= 8 && !hqPlaced; r++) {
@@ -348,12 +539,12 @@ async function main(): Promise<void> {
   );
 
   // =========================================================================
-  // 3. Transport, Demo Routes, Rail Block Signals, Popups, Town & Secondary Industry
+  // 4. Transport, Demo Routes, Rail Block Signals, Popups, Town & Secondary Industry
   // =========================================================================
-  section('3. Transport Networks, Demo Routes, Block Signals, Popups & Industry Chains');
+  section('4. Transport Networks, Demo Routes, Block Signals, Popups & Industry Chains');
 
   const transportEngine = createGameEngine({ scenario: 'boom', mapSize: 64, seed: 20261112 });
-  transportEngine.grantDevFunds('corporate', 3_000_000); // Ensure plenty of build capital for all 3 demo routes
+  transportEngine.grantDevFunds('corporate', 3_000_000);
 
   const initialTownPops = new Map<string, number>(
     transportEngine.getState().towns.map((t) => [t.id, t.population])
@@ -368,6 +559,17 @@ async function main(): Promise<void> {
   const rBus = transportEngine.spawnDemoRoute('bus_line');
   assert(rBus.ok, `spawnDemoRoute('bus_line') succeeded: ${rBus.message}`);
 
+  // Confirm demo route stations ALSO start at 0 waiting cargo before ticks run!
+  for (const stItem of transportEngine.getState().stations) {
+    for (const c of ALL_CARGO_TYPES) {
+      assertEq(
+        stItem.waitingCargo[c],
+        0,
+        `Demo station ${stItem.name} must start with 0 waiting ${c}`
+      );
+    }
+  }
+
   const signalTilesCount = transportEngine.getState().tiles.filter((t) => t.signal).length;
   assert(signalTilesCount > 0, `coal_rail built rail block signals (count=${signalTilesCount})`);
 
@@ -375,17 +577,16 @@ async function main(): Promise<void> {
   let sawSecondaryGoods = false;
   let totalMovedSteps = 0;
 
-  // Step 120 game days (960 sub-ticks) one sub-tick at a time to check movement, non-collision & deliveries
   const prevPositions = new Map<string, string>();
   for (const v of transportEngine.getState().vehicles) {
     prevPositions.set(v.id, `${v.x},${v.y}`);
   }
 
-  for (let step = 0; step < 120 * 8; step++) {
+  // Step 150 game days (150 * 14 = 2100 sub-ticks at TTD pace)
+  for (let step = 0; step < 150 * 14; step++) {
     transportEngine.tick(1);
     const cur = transportEngine.getState();
 
-    // Verify every moving vehicle sits on a valid road/rail tile
     const activeRailHeadPositions = new Map<string, string>();
     for (const v of cur.vehicles) {
       const tile = cur.tiles[tileIndex(v.x, v.y, cur.mapSize)];
@@ -400,7 +601,6 @@ async function main(): Promise<void> {
         prevPositions.set(v.id, posKey);
       }
 
-      // Check that two active rail trains never occupy the same non-depot rail tile simultaneously
       if (v.network === 'RAIL' && v.state !== 'IN_DEPOT' && !tile.depot) {
         const otherId = activeRailHeadPositions.get(posKey);
         assert(
@@ -415,7 +615,6 @@ async function main(): Promise<void> {
       sawPopup = true;
     }
 
-    // Check secondary industry GOODS production from WOOD deliveries to SAWMILL
     const sawmills = cur.industries.filter((i) => i.type === 'SAWMILL');
     const goodsInStations = cur.stations.some((s) => (s.waitingCargo.GOODS ?? 0) > 0);
     if (sawmills.some((m) => m.storedOutput > 0) || goodsInStations) {
@@ -424,7 +623,10 @@ async function main(): Promise<void> {
   }
 
   const afterTransport = transportEngine.getState();
-  assert(totalMovedSteps > 50, `Vehicles moved along road/rail networks (${totalMovedSteps} tile transitions)`);
+  assert(
+    totalMovedSteps > 50,
+    `Vehicles moved along road/rail networks (${totalMovedSteps} tile transitions)`
+  );
   assert(
     afterTransport.corporate.currentYearPnL.freightRevenue > 0,
     `Cargo delivered and generated corporate freight revenue (${afterTransport.corporate.currentYearPnL.freightRevenue} kr)`
@@ -448,7 +650,6 @@ async function main(): Promise<void> {
   sigTestEngine.grantDevFunds('corporate', 5_000_000);
   const sigState = sigTestEngine.getState();
 
-  // Find a 10-tile horizontal strip of flat clear land to lay a signaled test track
   let stripY = -1;
   let stripX = -1;
   for (let y = 6; y < sigState.mapSize - 6 && stripY === -1; y++) {
@@ -505,8 +706,7 @@ async function main(): Promise<void> {
     orders: [stEast.stationId!, stWest.stationId!],
   });
   assert(buyT1.ok, 'Bought lead train T1');
-  // Advance T1 past the signal at stripX+4, then stop it inside the block ahead (e.g. stripX+6..8)
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 160; i++) {
     sigTestEngine.tick(1);
     const t1 = sigTestEngine.getState().vehicles.find((v) => v.id === buyT1.vehicleId)!;
     if (t1.x >= stripX + 6 && t1.x <= stripX + 9) {
@@ -517,7 +717,6 @@ async function main(): Promise<void> {
   const t1Stopped = sigTestEngine.getState().vehicles.find((v) => v.id === buyT1.vehicleId)!;
   assertEq(t1Stopped.state, 'STOPPED', 'Lead train T1 stopped inside block ahead of signal');
 
-  // Dispatch trailing train T2 heading East toward the occupied block
   const buyT2 = sigTestEngine.buyVehicle({
     depotX: stripX + 1,
     depotY: stripY + 1,
@@ -528,7 +727,7 @@ async function main(): Promise<void> {
 
   let observedWaitingSignal = false;
   let observedRedSignalLamp = false;
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 160; i++) {
     sigTestEngine.tick(1);
     const s = sigTestEngine.getState();
     const t2 = s.vehicles.find((v) => v.id === buyT2.vehicleId)!;
@@ -548,17 +747,72 @@ async function main(): Promise<void> {
   assert(observedRedSignalLamp, 'Signal tile set signalBlocked = true while block occupied');
 
   console.log(
-    '  [OK] Demo routes (coal_rail, wood_truck, bus_line), rail block signals, popups, town growth & secondary industry verified.'
+    '  [OK] Demo routes, 0-start platforms, rail block signals, popups, town growth & secondary industry verified.'
   );
 
   // =========================================================================
-  // 4. Staggered AI Competitors & Stock Market (Months 12, 24, 36)
+  // 5. Continuous TTD Heightfield Seam Continuity (Zero Hill "Hull")
   // =========================================================================
-  section('4. Staggered AI Competitors (Months 12, 24, 36) & Stock Exchange');
+  section('5. Continuous Corner-Vertex Heightfield Seam & Slope Verification');
+
+  const meshState = transportEngine.getState();
+  let slopedTilesFound = 0;
+  let waterClampedCorners = 0;
+
+  for (let y = 0; y < meshState.mapSize; y++) {
+    for (let x = 0; x < meshState.mapSize; x++) {
+      const tile = meshState.tiles[tileIndex(x, y, meshState.mapSize)];
+      const corners = getTileCornerHeights(meshState, x, y);
+      if (corners.isSloped) slopedTilesFound++;
+
+      if (tile.terrain === 'WATER' || tile.elevation <= 0) {
+        assertEq(
+          getCornerHeight(meshState, x, y),
+          WATER_SURFACE_Y,
+          `Water corner (${x},${y}) clamps to WATER_SURFACE_Y`
+        );
+        waterClampedCorners++;
+      }
+
+      // Check shared East edge seam between (x, y) and (x + 1, y)
+      if (x + 1 < meshState.mapSize) {
+        for (const offsetZ of [-0.35, 0.0, 0.35]) {
+          const hLeft = getSurfaceHeightAt(meshState, x + 0.4999, y + offsetZ);
+          const hRight = getSurfaceHeightAt(meshState, x + 0.5001, y + offsetZ);
+          assert(
+            Math.abs(hLeft - hRight) < 0.001,
+            `Heightfield seam gap at East edge (${x}+0.5, ${y + offsetZ}): ${hLeft} vs ${hRight}`
+          );
+        }
+      }
+
+      // Check shared South edge seam between (x, y) and (x, y + 1)
+      if (y + 1 < meshState.mapSize) {
+        for (const offsetX of [-0.35, 0.0, 0.35]) {
+          const hNorth = getSurfaceHeightAt(meshState, x + offsetX, y + 0.4999);
+          const hSouth = getSurfaceHeightAt(meshState, x + offsetX, y + 0.5001);
+          assert(
+            Math.abs(hNorth - hSouth) < 0.001,
+            `Heightfield seam gap at South edge (${x + offsetX}, ${y}+0.5): ${hNorth} vs ${hSouth}`
+          );
+        }
+      }
+    }
+  }
+  assert(slopedTilesFound > 100, `Map contains sloped hill tiles (${slopedTilesFound})`);
+  assert(waterClampedCorners > 50, `Water coastline corners clamped cleanly (${waterClampedCorners})`);
+
+  console.log(
+    `  [OK] Watertight continuous heightfield verified across ${slopedTilesFound} sloped tiles with 0 seam gaps.`
+  );
+
+  // =========================================================================
+  // 6. Staggered AI Competitors & Stock Market (Months 12, 24, 36)
+  // =========================================================================
+  section('6. Staggered AI Competitors (Months 12, 24, 36) & Stock Exchange');
 
   const aiEngine = createGameEngine({ scenario: 'standard', mapSize: 64, seed: 20261112 });
 
-  // Fast-forward 11 months (all of Year 1 prior to Month 12 rollover)
   aiEngine.fastForwardMonths(11);
   let aiState = aiEngine.getState();
   assertEq(aiState.date.totalMonths, 11, 'Advanced to Month 11 (Year 1)');
@@ -567,7 +821,6 @@ async function main(): Promise<void> {
     'Zero AI competitors may spawn during Year 1 (Months 0..11)'
   );
 
-  // Month 12 -> Nordic Rail & Cargo
   aiEngine.fastForwardMonths(1);
   aiState = aiEngine.getState();
   assertEq(aiState.date.totalMonths, 12, 'Reached Month 12 (Start of Year 2)');
@@ -579,7 +832,6 @@ async function main(): Promise<void> {
   assert(ai1.fleetCount > 0 && ai1.sharePrice > 0, 'Nordic Rail & Cargo built routes and listed shares');
   assert(!ai2At12.spawned && !ai3At12.spawned, 'ai-2 and ai-3 remain unspawned at Month 12');
 
-  // Month 24 -> FjordExpress AS
   aiEngine.fastForwardMonths(12);
   aiState = aiEngine.getState();
   assertEq(aiState.date.totalMonths, 24, 'Reached Month 24 (Start of Year 3)');
@@ -589,7 +841,6 @@ async function main(): Promise<void> {
   assert(ai2.spawned && ai2.fleetCount > 0 && ai2.sharePrice > 0, 'FjordExpress AS spawned & built routes at Month 24');
   assert(!ai3At24.spawned, 'ai-3 remains unspawned at Month 24');
 
-  // Month 36 -> Sørlandet Transport
   aiEngine.fastForwardMonths(12);
   aiState = aiEngine.getState();
   assertEq(aiState.date.totalMonths, 36, 'Reached Month 36 (Start of Year 4)');
@@ -597,8 +848,7 @@ async function main(): Promise<void> {
   assertEq(ai3.name, 'Sørlandet Transport', 'ai-3 is Sørlandet Transport');
   assert(ai3.spawned && ai3.fleetCount > 0 && ai3.sharePrice > 0, 'Sørlandet Transport spawned & built routes at Month 36');
 
-  // Stock Market: Buy & Sell 10% blocks up to 75% cap strictly using Personal Cash
-  aiEngine.setMonthlyGrossSalary(0); // Freeze salary so quarterly dividends isolate cleanly on Personal Cash
+  aiEngine.setMonthlyGrossSalary(0);
   aiEngine.grantDevFunds('personal', 25_000_000);
 
   const corpCashBeforeStocks = aiEngine.getState().corporate.cash;
@@ -619,7 +869,6 @@ async function main(): Promise<void> {
     'Buying 10% AI shares deducts exact share block cost from Personal Cash'
   );
 
-  // Buy 6 more 10% blocks -> 70% total
   for (let b = 2; b <= 7; b++) {
     const r = aiEngine.buyAIShares('ai-1', 10);
     assert(r.ok, `Buying 10% block #${b} (to ${b * 10}%) succeeds`);
@@ -630,11 +879,9 @@ async function main(): Promise<void> {
     'Player holds 70% of ai-1 after 7 blocks'
   );
 
-  // Attempting an 8th 10% block (80% > 75% cap) MUST be rejected
   const overCapBuy = aiEngine.buyAIShares('ai-1', 10);
   assert(!overCapBuy.ok, 'Buying 10% beyond 75% max stake (to 80%) is rejected');
 
-  // Buying 5% up to exact 75% cap succeeds, and further purchase is rejected
   const exactCapBuy = aiEngine.buyAIShares('ai-1', 5);
   assert(exactCapBuy.ok, 'Buying up to exact 75% cap succeeds');
   assertEq(
@@ -644,7 +891,6 @@ async function main(): Promise<void> {
   );
   assert(!aiEngine.buyAIShares('ai-1', 5).ok, 'Cannot buy above 75% cap');
 
-  // Sell a 10% block -> down to 65%, crediting Personal Cash
   const persBeforeSell = aiEngine.getState().personal.cash;
   const sellRes = aiEngine.sellAIShares('ai-1', 10);
   assert(sellRes.ok, 'Selling 10% share block succeeds');
@@ -658,7 +904,6 @@ async function main(): Promise<void> {
     'Selling AI shares must NOT touch Corporate Cash'
   );
 
-  // Also buy stakes in ai-2 and ai-3, then fast-forward 3 months (1 quarter) with 0 salary to verify quarterly dividends
   aiEngine.buyAIShares('ai-2', 50);
   aiEngine.buyAIShares('ai-3', 50);
   const persBeforeQuarter = aiEngine.getState().personal.cash;
@@ -679,9 +924,9 @@ async function main(): Promise<void> {
   );
 
   // =========================================================================
-  // 5. Firebase Config, Firestore Rules & Classroom Telemetry Contract
+  // 7. Firebase Config, Firestore Rules & Classroom Telemetry Contract
   // =========================================================================
-  section('5. Firebase Config, Firestore Rules & Classroom Module');
+  section('7. Firebase Config, Firestore Rules & Classroom Module');
 
   const rootDir = path.resolve(process.cwd());
   const rulesPath = path.join(rootDir, 'firestore.rules');
@@ -706,7 +951,6 @@ async function main(): Promise<void> {
   assert(typeof pushStudentTelemetry === 'function', 'pushStudentTelemetry exported');
   assert(typeof subscribeToClassroom === 'function', 'subscribeToClassroom exported');
 
-  // Verify Save/Load JSON roundtrip integrity
   const exportedJson = aiEngine.exportSaveJson();
   const roundtripEngine = new GameEngine();
   const importRes = roundtripEngine.importSaveJson(exportedJson);

@@ -25,7 +25,8 @@ import {
   formatGameDate,
   formatKr,
   getHQCumulativeValue,
-   getHQTierSpec,
+  getHQTierSpec,
+  getStationCatchmentRadius,
   HQ_BONUS_RADIUS,
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
@@ -33,7 +34,6 @@ import {
   INITIAL_PERSONAL_CASH_KR,
   LOAN_STEP_KR,
   MAX_PLAYER_AI_SHARE_PCT,
-  STATION_CATCHMENT_RADIUS,
   TOTAL_AI_SHARES,
 } from './catalog';
 import { expandTownBuildings, inBounds, tileIndex } from './mapGenerator';
@@ -160,18 +160,43 @@ export function updateStationRatings(state: GameState): void {
 }
 
 export function refreshStationCatchment(state: GameState, station: Station): void {
+  const radius = getStationCatchmentRadius(station.kind);
   let bestTownId: string | null = null;
   let bestTownDist = Infinity;
 
-  for (const town of state.towns) {
-    for (const stTile of station.tiles) {
-      const dist = Math.max(
-        Math.abs(stTile.x - town.x),
-        Math.abs(stTile.y - town.y)
-      );
-      if (dist <= STATION_CATCHMENT_RADIUS + 2 && dist < bestTownDist) {
-        bestTownDist = dist;
-        bestTownId = town.id;
+  // Check town tiles / buildings inside catchment first, or town center within radius + 2
+  for (const stTile of station.tiles) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const tx = stTile.x + dx;
+        const ty = stTile.y + dy;
+        if (!inBounds(tx, ty, state.mapSize)) continue;
+        const t = state.tiles[tileIndex(tx, ty, state.mapSize)];
+        if (t.townId) {
+          const town = state.towns.find((tw) => tw.id === t.townId);
+          if (town) {
+            const dist = Math.hypot(stTile.x - town.x, stTile.y - town.y);
+            if (dist < bestTownDist) {
+              bestTownDist = dist;
+              bestTownId = town.id;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!bestTownId) {
+    for (const town of state.towns) {
+      for (const stTile of station.tiles) {
+        const dist = Math.max(
+          Math.abs(stTile.x - town.x),
+          Math.abs(stTile.y - town.y)
+        );
+        if (dist <= radius + 2 && dist < bestTownDist) {
+          bestTownDist = dist;
+          bestTownId = town.id;
+        }
       }
     }
   }
@@ -186,7 +211,7 @@ export function refreshStationCatchment(state: GameState, station: Station): voi
         const iy = ind.y + dy;
         for (const stTile of station.tiles) {
           const dist = Math.max(Math.abs(stTile.x - ix), Math.abs(stTile.y - iy));
-          if (dist <= STATION_CATCHMENT_RADIUS) {
+          if (dist <= radius) {
             inCatchment = true;
             break;
           }
@@ -198,6 +223,39 @@ export function refreshStationCatchment(state: GameState, station: Station): voi
     }
   }
   station.nearbyIndustryIds = nearbyIds;
+}
+
+export function doesStationCatchmentProduceCargo(
+  state: GameState,
+  station: Station,
+  cargo: CargoType
+): boolean {
+  for (const indId of station.nearbyIndustryIds) {
+    const ind = state.industries.find((i) => i.id === indId);
+    if (ind && ind.produces === cargo) {
+      return true;
+    }
+  }
+
+  if (cargo === 'PASSENGERS' || cargo === 'MAIL') {
+    if (station.kind === 'BUS_STOP' && cargo === 'MAIL') return false;
+    if (station.kind === 'TRUCK_BAY' && cargo === 'PASSENGERS') return false;
+    const radius = getStationCatchmentRadius(station.kind);
+    for (const stTile of station.tiles) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const tx = stTile.x + dx;
+          const ty = stTile.y + dy;
+          if (!inBounds(tx, ty, state.mapSize)) continue;
+          const t = state.tiles[tileIndex(tx, ty, state.mapSize)];
+          if ((t.buildingTier ?? 0) > 0) return true;
+        }
+      }
+    }
+    return Boolean(station.townId);
+  }
+
+  return false;
 }
 
 export function doesStationAcceptCargo(
@@ -232,44 +290,16 @@ export function doesStationAcceptCargo(
 }
 
 /**
- * Seeds a newly constructed station with an initial small batch from nearby industries/towns
- * so newly built classroom or demo routes begin loading promptly.
+ * Authentic TTD initialization: newly constructed stations ALWAYS start with 0 waiting cargo/passengers!
+ * Cargo and passengers trickle in organically over subsequent 5-day economy ticks.
  */
-export function seedInitialStationCargo(state: GameState, station: Station): void {
+export function seedInitialStationCargo(state: GameState, _station: Station): void {
   updateStationRatings(state);
-
-  for (const indId of station.nearbyIndustryIds) {
-    const ind = state.industries.find((i) => i.id === indId);
-    if (!ind || !ind.produces) continue;
-    if (station.kind === 'BUS_STOP' && ind.produces !== 'PASSENGERS') continue;
-
-    if (ind.storedOutput > 0) {
-      const initialBatch = Math.min(ind.storedOutput, 32);
-      ind.storedOutput -= initialBatch;
-      station.waitingCargo[ind.produces] =
-        (station.waitingCargo[ind.produces] ?? 0) + initialBatch;
-    }
-  }
-
-  if (station.townId) {
-    const town = state.towns.find((t) => t.id === station.townId);
-    if (town) {
-      if (station.kind === 'BUS_STOP' || station.kind === 'TRAIN_STATION') {
-        const initialPax = Math.max(12, Math.round(town.monthlyPassengers * 0.35));
-        station.waitingCargo.PASSENGERS =
-          (station.waitingCargo.PASSENGERS ?? 0) + initialPax;
-      }
-      if (station.kind === 'TRUCK_BAY' || station.kind === 'TRAIN_STATION') {
-        const initialMail = Math.max(6, Math.round(town.monthlyMail * 0.3));
-        station.waitingCargo.MAIL = (station.waitingCargo.MAIL ?? 0) + initialMail;
-      }
-    }
-  }
 }
 
 /**
- * Distributes 1/6th of monthly industry & town cargo output every 5 game days
- * across nearby stations weighted by OpenTTD station ratings.
+ * Distributes 1/6th of monthly industry output and catchment-based town building supply
+ * every 5 game days across nearby stations weighted by OpenTTD station ratings.
  */
 export function distributePeriodicCargoOutput(state: GameState): void {
   updateStationRatings(state);
@@ -294,7 +324,7 @@ export function distributePeriodicCargoOutput(state: GameState): void {
 
     if (candidateStations.length === 0) {
       // Cap storedOutput when unserved
-      ind.storedOutput = Math.min(160, ind.storedOutput);
+      ind.storedOutput = Math.min(120, ind.storedOutput);
       continue;
     }
 
@@ -330,60 +360,98 @@ export function distributePeriodicCargoOutput(state: GameState): void {
     }
   }
 
-  // 2. Towns (Passengers & Mail)
-  for (const town of state.towns) {
-    const townStations = state.stations.filter((s) => s.townId === town.id);
-    if (townStations.length === 0) continue;
+  // 2. Towns (Passengers & Mail computed strictly from actual buildingTier tiles inside each station's 3/4-tile catchment)
+  const paxStations = state.stations.filter(
+    (s) => s.kind === 'BUS_STOP' || s.kind === 'TRAIN_STATION'
+  );
+  const mailStations = state.stations.filter(
+    (s) => s.kind === 'TRUCK_BAY' || s.kind === 'TRAIN_STATION'
+  );
 
-    // Passengers -> Bus Stops & Train Stations
-    const paxStations = townStations.filter(
-      (s) => s.kind === 'BUS_STOP' || s.kind === 'TRAIN_STATION'
-    );
-    if (paxStations.length > 0) {
-      const maxPaxRating = Math.max(
-        ...paxStations.map((s) => s.ratings.PASSENGERS ?? 65)
-      );
-      const sumPaxRating = paxStations.reduce(
-        (acc, s) => acc + Math.max(10, s.ratings.PASSENGERS ?? 65),
-        0
-      );
-      const paxBatch = Math.max(
-        2,
-        Math.round((town.monthlyPassengers / 6) * (maxPaxRating / 100))
-      );
-      for (const st of paxStations) {
-        const share =
-          (paxBatch * Math.max(10, st.ratings.PASSENGERS ?? 65)) / sumPaxRating;
-        st.waitingCargo.PASSENGERS = Math.min(
-          450,
-          (st.waitingCargo.PASSENGERS ?? 0) + Math.max(1, Math.round(share))
-        );
+  if (paxStations.length > 0 || mailStations.length > 0) {
+    const paxAccum = new Map<string, number>();
+    const mailAccum = new Map<string, number>();
+
+    for (let i = 0; i < state.tiles.length; i++) {
+      const t = state.tiles[i];
+      const tier = t.buildingTier ?? 0;
+      if (tier <= 0) continue;
+
+      // Passengers from this building tile (~0.52 per buildingTier -> ~2..5 pax per 5 days for a typical early bus stop)
+      if (paxStations.length > 0) {
+        const coveringPax = paxStations.filter((st) => {
+          const r = getStationCatchmentRadius(st.kind);
+          return st.tiles.some(
+            (pt) => Math.max(Math.abs(pt.x - t.x), Math.abs(pt.y - t.y)) <= r
+          );
+        });
+        if (coveringPax.length > 0) {
+          const maxRating = Math.max(
+            ...coveringPax.map((s) => s.ratings.PASSENGERS ?? 65)
+          );
+          const sumRating = coveringPax.reduce(
+            (acc, s) => acc + Math.max(10, s.ratings.PASSENGERS ?? 65),
+            0
+          );
+          const tilePax = tier * 0.52 * (maxRating / 100);
+          for (const st of coveringPax) {
+            const share =
+              (tilePax * Math.max(10, st.ratings.PASSENGERS ?? 65)) / sumRating;
+            paxAccum.set(st.id, (paxAccum.get(st.id) ?? 0) + share);
+          }
+        }
+      }
+
+      // Mail from this building tile (~0.22 per buildingTier -> ~1..2 mail bags per 5 days)
+      if (mailStations.length > 0) {
+        const coveringMail = mailStations.filter((st) => {
+          const r = getStationCatchmentRadius(st.kind);
+          return st.tiles.some(
+            (pt) => Math.max(Math.abs(pt.x - t.x), Math.abs(pt.y - t.y)) <= r
+          );
+        });
+        if (coveringMail.length > 0) {
+          const maxRating = Math.max(
+            ...coveringMail.map((s) => s.ratings.MAIL ?? 65)
+          );
+          const sumRating = coveringMail.reduce(
+            (acc, s) => acc + Math.max(10, s.ratings.MAIL ?? 65),
+            0
+          );
+          const tileMail = tier * 0.22 * (maxRating / 100);
+          for (const st of coveringMail) {
+            const share =
+              (tileMail * Math.max(10, st.ratings.MAIL ?? 65)) / sumRating;
+            mailAccum.set(st.id, (mailAccum.get(st.id) ?? 0) + share);
+          }
+        }
       }
     }
 
-    // Mail -> Truck Bays & Train Stations
-    const mailStations = townStations.filter(
-      (s) => s.kind === 'TRUCK_BAY' || s.kind === 'TRAIN_STATION'
-    );
-    if (mailStations.length > 0) {
-      const maxMailRating = Math.max(
-        ...mailStations.map((s) => s.ratings.MAIL ?? 65)
-      );
-      const sumMailRating = mailStations.reduce(
-        (acc, s) => acc + Math.max(10, s.ratings.MAIL ?? 65),
-        0
-      );
-      const mailBatch = Math.max(
-        1,
-        Math.round((town.monthlyMail / 6) * (maxMailRating / 100))
-      );
-      for (const st of mailStations) {
-        const share =
-          (mailBatch * Math.max(10, st.ratings.MAIL ?? 65)) / sumMailRating;
-        st.waitingCargo.MAIL = Math.min(
-          300,
-          (st.waitingCargo.MAIL ?? 0) + Math.max(1, Math.round(share))
-        );
+    for (const st of paxStations) {
+      const rawPax = paxAccum.get(st.id) ?? (st.townId ? 0.85 : 0);
+      if (rawPax > 0) {
+        const added = Math.max(1, Math.round(rawPax));
+        st.waitingCargo.PASSENGERS = (st.waitingCargo.PASSENGERS ?? 0) + added;
+      }
+      // Bleed off -12% of excess waiting passengers above 80 (bus stop) / 200 (train station) every 5 days
+      const paxCap = st.kind === 'TRAIN_STATION' ? 200 : 80;
+      if ((st.waitingCargo.PASSENGERS ?? 0) > paxCap) {
+        const excess = st.waitingCargo.PASSENGERS - paxCap;
+        st.waitingCargo.PASSENGERS -= Math.max(1, Math.ceil(excess * 0.12));
+      }
+    }
+
+    for (const st of mailStations) {
+      const rawMail = mailAccum.get(st.id) ?? (st.townId ? 0.4 : 0);
+      if (rawMail >= 0.4) {
+        const added = Math.max(1, Math.round(rawMail));
+        st.waitingCargo.MAIL = (st.waitingCargo.MAIL ?? 0) + added;
+      }
+      const mailCap = st.kind === 'TRAIN_STATION' ? 150 : 60;
+      if ((st.waitingCargo.MAIL ?? 0) > mailCap) {
+        const excess = st.waitingCargo.MAIL - mailCap;
+        st.waitingCargo.MAIL -= Math.max(1, Math.ceil(excess * 0.12));
       }
     }
   }
@@ -836,8 +904,8 @@ export function runMonthlyEconomyTick(state: GameState): void {
       if (wholePopIncrease > 0) {
         town.population += wholePopIncrease;
         town.growthCounter -= wholePopIncrease;
-        town.monthlyPassengers = Math.max(25, Math.round(town.population * 0.14));
-        town.monthlyMail = Math.max(12, Math.round(town.population * 0.06));
+        town.monthlyPassengers = Math.max(14, Math.round(town.population * 0.06));
+        town.monthlyMail = Math.max(6, Math.round(town.population * 0.025));
         if (expandTownBuildings(state.tiles, state.mapSize, town)) {
           buildingsExpanded = true;
         }

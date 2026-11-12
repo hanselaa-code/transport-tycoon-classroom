@@ -1,5 +1,5 @@
 import type { FloatingPopup, GameState } from '../types/game';
-import { IsoSceneManager, getTileAt, getTileSurfaceY } from './IsoSceneManager';
+import { IsoSceneManager, getSurfaceHeightAt } from './IsoSceneManager';
 
 const POPUP_DURATION_MS = 2200;
 
@@ -14,25 +14,25 @@ interface ActivePopupEntry {
 
 const COLOR_STYLES: Record<
   FloatingPopup['color'],
-  { text: string; glow: string; bg: string; border: string }
+  { text: string; bg: string; lightBevel: string; darkBevel: string }
 > = {
   green: {
-    text: '#4ade80',
-    glow: '0 1px 4px rgba(0, 0, 0, 0.92)',
-    bg: 'rgba(6, 78, 59, 0.82)',
-    border: 'rgba(74, 222, 128, 0.6)',
+    text: '#86efac',
+    bg: 'rgba(20, 64, 32, 0.92)',
+    lightBevel: '#4ade80',
+    darkBevel: '#052e16',
   },
   red: {
     text: '#fca5a5',
-    glow: '0 1px 4px rgba(0, 0, 0, 0.92)',
-    bg: 'rgba(127, 29, 29, 0.84)',
-    border: 'rgba(248, 113, 113, 0.6)',
+    bg: 'rgba(105, 24, 24, 0.92)',
+    lightBevel: '#f87171',
+    darkBevel: '#450a0a',
   },
   amber: {
     text: '#fde047',
-    glow: '0 1px 4px rgba(0, 0, 0, 0.92)',
-    bg: 'rgba(120, 53, 15, 0.84)',
-    border: 'rgba(251, 191, 36, 0.6)',
+    bg: 'rgba(92, 54, 14, 0.92)',
+    lightBevel: '#fbbf24',
+    darkBevel: '#451a03',
   },
 };
 
@@ -65,15 +65,13 @@ export class FloatingPopups {
 
       this.recordSeen(p.id);
 
-      // Skip very old popups when loading a saved game
       const ageWallMs = nowWallMs - (p.createdAtMs || nowWallMs);
       if (ageWallMs > POPUP_DURATION_MS + 600) {
         continue;
       }
 
       const initialElapsed = Math.max(0, Math.min(450, ageWallMs));
-      const tile = getTileAt(state, Math.round(p.x), Math.round(p.y));
-      const wy = getTileSurfaceY(tile) + 0.58;
+      const wy = getSurfaceHeightAt(state, p.x, p.y) + 0.58;
 
       this.mountPopup(
         p.id,
@@ -95,8 +93,7 @@ export class FloatingPopups {
     state: GameState
   ): void {
     const id = `local-popup-${++this.localSeq}`;
-    const tile = getTileAt(state, Math.round(x), Math.round(y));
-    const wy = getTileSurfaceY(tile) + 0.58;
+    const wy = getSurfaceHeightAt(state, x, y) + 0.58;
     this.mountPopup(id, x, y, wy, text, color, performance.now());
   }
 
@@ -127,18 +124,21 @@ export class FloatingPopups {
     el.style.position = 'absolute';
     el.style.left = '0';
     el.style.top = '0';
-    el.style.padding = '2px 8px';
-    el.style.borderRadius = '9999px';
+    el.style.padding = '2px 7px';
+    el.style.borderRadius = '0px';
     el.style.background = palette.bg;
-    el.style.border = `1px solid ${palette.border}`;
+    el.style.borderTop = `1px solid ${palette.lightBevel}`;
+    el.style.borderLeft = `1px solid ${palette.lightBevel}`;
+    el.style.borderRight = `1px solid ${palette.darkBevel}`;
+    el.style.borderBottom = `1px solid ${palette.darkBevel}`;
     el.style.color = palette.text;
-    el.style.textShadow = palette.glow;
-    el.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-    el.style.fontSize = '12px';
-    el.style.fontWeight = '800';
+    el.style.textShadow = '1px 1px 0px #000000';
+    el.style.fontFamily = 'Tahoma, Verdana, ui-monospace, monospace';
+    el.style.fontSize = '11px';
+    el.style.fontWeight = '700';
     el.style.whiteSpace = 'nowrap';
     el.style.willChange = 'transform, opacity';
-    el.style.boxShadow = '0 3px 10px rgba(0,0,0,0.35)';
+    el.style.boxShadow = '2px 2px 4px rgba(0, 0, 0, 0.55)';
 
     this.container.appendChild(el);
     this.active.set(id, {
@@ -167,7 +167,6 @@ export class FloatingPopups {
         continue;
       }
 
-      // Smooth ease-out rise over 2.2 seconds + gentle fade out in second half
       const easedRise = 1 - Math.pow(1 - t, 2.1);
       const risePx = easedRise * 52;
       const opacity = t < 0.55 ? 1 : Math.max(0, 1 - (t - 0.55) / 0.45);

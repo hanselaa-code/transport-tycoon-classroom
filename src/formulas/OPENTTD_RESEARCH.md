@@ -27,23 +27,24 @@ return BigMulS(dist * time_factor * num_pieces, cs->current_payment, 21);
 ### Extracted OpenTTD `_default_cargo` Constants
 | Cargo (`FormulaCargoType`) | OpenTTD Label | `initial_payment` | `td1` (`transit_periods[0]`) | `td2` (`transit_periods[1]`) | `TownAcceptanceEffect` | Calibrated `baseRateKr` | Classroom `days1` / `days2` |
 | :--- | :--- | :---: | :---: | :---: | :--- | :---: | :---: |
-| `PASSENGERS` (*Passasjerer*) | `CT_PASSENGERS` | `3185` | `0` | `24` | `Passengers` | `10.0 kr` | `3` / `24` |
-| `MAIL` (*Post*) | `CT_MAIL` | `4550` | `20` | `90` | `Mail` | `14.5 kr` | `15` / `75` |
-| `COAL` (*Kull*) | `CT_COAL` | `5916` | `7` | `255` | `None` | `18.5 kr` | `18` / `255` |
-| `WOOD` (*Tømmer*) | `CT_WOOD` (Temp.) | `5005` | `15` | `255` | `None` | `16.0 kr` | `35` / `255` |
-| `GOODS` (*Varer*) | `CT_GOODS` | `6144` | `5` | `28` | `Goods` | `19.5 kr` | `12` / `45` |
-| `GRAIN` (*Korn*) | `CT_GRAIN` | `4778` | `4` | `40` | `None` | `15.0 kr` | `10` / `50` |
-| `FOOD` (*Matvarer*) | `CT_FOOD` | `5688` | `0` | `30` | `Food` | `18.0 kr` | `4` / `30` |
+| `PASSENGERS` (*Passasjerer*) | `CT_PASSENGERS` | `3185` | `0` | `24` | `Passengers` | `3.2 kr` | `3` / `24` |
+| `MAIL` (*Post*) | `CT_MAIL` | `4550` | `20` | `90` | `Mail` | `5.2 kr` | `15` / `75` |
+| `COAL` (*Kull*) | `CT_COAL` | `5916` | `7` | `255` | `None` | `11.5 kr` | `18` / `255` |
+| `WOOD` (*Tømmer*) | `CT_WOOD` (Temp.) | `5005` | `15` | `255` | `None` | `10.2 kr` | `35` / `255` |
+| `GOODS` (*Varer*) | `CT_GOODS` | `6144` | `5` | `28` | `Goods` | `13.5 kr` | `12` / `45` |
+| `GRAIN` (*Korn*) | `CT_GRAIN` | `4778` | `4` | `40` | `None` | `9.8 kr` | `10` / `50` |
+| `FOOD` (*Matvarer*) | `CT_FOOD` | `5688` | `0` | `30` | `Food` | `12.2 kr` | `4` / `30` |
 
 ### Classroom `kr` Calibration (`calculateCargoPayment`)
-- `baseRateKr` scales OpenTTD's `initial_payment` linearly (`~0.00314 kr` per OpenTTD unit):
+- In authentic OpenTTD (`cargo_const.h`), passengers (`weight=1`, `ip=3185`) and mail (`weight=4`, `ip=4550`) are low-unit-value municipal/express flows that primarily stimulate town growth (`TownAcceptanceEffect::Passengers` / `Mail`) rather than printing massive profits from a single cheap `65 000 kr` bus, whereas heavy bulk & processed commodities (`GRAIN`, `WOOD`, `COAL`, `FOOD`, `GOODS`) reward capital-intensive truck fleets and multi-wagon trains:
   $$\text{timeFactor} = \max\bigl(31,\; 255 - \max(0, d - \text{days}_1) - \max(0, d - \text{days}_2)\bigr)$$
   $$\text{Income (kr)} = \text{round}\!\left(\text{manhattanDistance} \times \text{units} \times \text{baseRateKr} \times \frac{\text{timeFactor}}{255}\right)$$
-- **Sample Route Yields:**
-  - City Bus (`35` pax, `20` tiles, fast transit): `7 000 kr`
-  - Timber Truck (`25` tons `WOOD`, `24` tiles): `9 600 kr`
-  - Goods Truck (`25` crates `GOODS`, `30` tiles): `14 625 kr`
-  - Heavy Coal Train (`100` tons `COAL`, `38` tiles): `70 300 kr`
+- **Sample Route Yields (TTD-Balanced):**
+  - City/Intercity Bus (`32` pax, `20` tiles, fast transit): `2 048 kr` (modest, steady farebox yield)
+  - Mail Truck (`25` bags `MAIL`, `24` tiles): `3 120 kr`
+  - Timber Truck (`25` tons `WOOD`, `24` tiles): `6 120 kr`
+  - Goods Truck (`25` crates `GOODS`, `30` tiles): `10 125 kr`
+  - Heavy Coal Train (`96` tons `COAL` [3 wagons], `38` tiles): `41 952 kr`
 
 ---
 

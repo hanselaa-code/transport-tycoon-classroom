@@ -16,7 +16,8 @@ import {
   Save,
   GraduationCap,
   Wrench,
-  MousePointer,
+  HelpCircle,
+  Hammer,
 } from 'lucide-react';
 import type { GameSpeed, ToolType } from '../types/game';
 
@@ -32,11 +33,13 @@ export type WindowId =
   | 'stock_market'
   | 'save_load'
   | 'classroom'
-  | 'quick_test';
+  | 'quick_test'
+  | 'land_info';
 
 export interface TopToolbarProps {
   speed: GameSpeed;
   activeTool: ToolType;
+  isQueryLandActive: boolean;
   openWindows: Set<WindowId>;
   playerVehicleCount: number;
   hqTier: number;
@@ -48,6 +51,7 @@ export interface TopToolbarProps {
   onZoomOut: () => void;
   onRotateMap: () => void;
   onSelectTool: (tool: ToolType) => void;
+  onToggleQueryLand: () => void;
   onToggleWindow: (id: WindowId) => void;
 }
 
@@ -61,6 +65,7 @@ function formatCountdown(sec: number | null): string {
 export const TopToolbar: React.FC<TopToolbarProps> = ({
   speed,
   activeTool,
+  isQueryLandActive,
   openWindows,
   playerVehicleCount,
   hqTier,
@@ -72,6 +77,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   onZoomOut,
   onRotateMap,
   onSelectTool,
+  onToggleQueryLand,
   onToggleWindow,
 }) => {
   const isRailTool =
@@ -87,24 +93,28 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
     activeTool === 'TRUCK_BAY';
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-[900] ttd-bar-top px-1.5 py-1 flex flex-wrap items-center justify-between gap-1">
-      {/* Left: Speed & Camera Controls */}
-      <div className="flex items-center gap-1 flex-wrap">
-        {/* Speed Group */}
-        <div className="flex items-center ttd-inset p-0.5 gap-0.5" title="Spillhastighet">
+    <header className="fixed top-0 left-0 right-0 z-[900] h-[36px] ttd-bar-top px-1 flex items-center justify-between gap-1 flex-nowrap overflow-x-auto no-scrollbar">
+      {/* Left Cluster: Speed • Save & [?] Query • Zoom/Rotate */}
+      <div className="flex items-center gap-1 shrink-0">
+        {/* [Pause | 1x | 2x | 4x] */}
+        <div className="flex items-center gap-0.5" title="Spillhastighet">
           <button
             type="button"
             onClick={() => onSetSpeed(0)}
             title="Pause (0x)"
-            className={`ttd-btn !px-1.5 !py-1 ${speed === 0 ? 'ttd-btn-active !text-amber-300' : ''}`}
+            className={`ttd-btn !px-1.5 !h-[26px] ${
+              speed === 0 ? 'ttd-btn-active' : ''
+            }`}
           >
             <Pause className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"
             onClick={() => onSetSpeed(1)}
-            title="Normal hastighet (1x)"
-            className={`ttd-btn !px-1.5 !py-1 ttd-num ${speed === 1 ? 'ttd-btn-active' : ''}`}
+            title="Normal hastighet (1x TTD-tempo)"
+            className={`ttd-btn !px-1.5 !h-[26px] ttd-num ${
+              speed === 1 ? 'ttd-btn-active' : ''
+            }`}
           >
             <Play className="w-3 h-3" />
             <span>1x</span>
@@ -112,8 +122,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             type="button"
             onClick={() => onSetSpeed(2)}
-            title="Rask hastighet (2x)"
-            className={`ttd-btn !px-1.5 !py-1 ttd-num ${speed === 2 ? 'ttd-btn-active' : ''}`}
+            title="Dobbel hastighet (2x)"
+            className={`ttd-btn !px-1.5 !h-[26px] ttd-num ${
+              speed === 2 ? 'ttd-btn-active' : ''
+            }`}
           >
             <span>2x</span>
           </button>
@@ -121,20 +133,54 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             type="button"
             onClick={() => onSetSpeed(4)}
             title="Hurtigspoling (4x)"
-            className={`ttd-btn !px-1.5 !py-1 ttd-num ${speed === 4 ? 'ttd-btn-active' : ''}`}
+            className={`ttd-btn !px-1.5 !h-[26px] ttd-num ${
+              speed === 4 ? 'ttd-btn-active' : ''
+            }`}
           >
             <FastForward className="w-3 h-3" />
             <span>4x</span>
           </button>
         </div>
 
-        {/* Camera Zoom & Rotate */}
-        <div className="flex items-center ttd-inset p-0.5 gap-0.5">
+        <div className="ttd-divider" />
+
+        {/* [Lagre] [? Undersøk] */}
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => onToggleWindow('save_load')}
+            title="Lagre / Last inn / Nytt spill"
+            className={`ttd-btn !px-1.5 !h-[26px] ${
+              openWindows.has('save_load') ? 'ttd-btn-active' : ''
+            }`}
+          >
+            <Save className="w-3.5 h-3.5 text-amber-200" />
+            <span className="hidden xl:inline">Lagre</span>
+          </button>
+          <button
+            type="button"
+            onClick={onToggleQueryLand}
+            title="Undersøk landrute [?] – vis terreng, eier, tilbud og etterspørsel"
+            className={`ttd-btn !px-1.5 !h-[26px] ${
+              isQueryLandActive || openWindows.has('land_info')
+                ? 'ttd-btn-active'
+                : ''
+            }`}
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-amber-300" />
+            <span>?</span>
+          </button>
+        </div>
+
+        <div className="ttd-divider" />
+
+        {/* [Zoom + | Zoom - | Roter] */}
+        <div className="flex items-center gap-0.5">
           <button
             type="button"
             onClick={onZoomIn}
             title="Zoom inn"
-            className="ttd-btn !px-1.5 !py-1"
+            className="ttd-btn !px-1.5 !h-[26px]"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -142,7 +188,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             type="button"
             onClick={onZoomOut}
             title="Zoom ut"
-            className="ttd-btn !px-1.5 !py-1"
+            className="ttd-btn !px-1.5 !h-[26px]"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
@@ -150,29 +196,114 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             type="button"
             onClick={onRotateMap}
             title="Roter kart 90°"
-            className="ttd-btn !px-1.5 !py-1"
+            className="ttd-btn !px-1.5 !h-[26px]"
           >
             <RotateCw className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">90°</span>
           </button>
+        </div>
+      </div>
+
+      {/* Center Cluster: Finances/Assets • Directory/Fleet • Construction */}
+      <div className="flex items-center gap-1 shrink-0">
+        {/* [Selskap AS] [Privat & Skatt] [HQ] [Børs] */}
+        <div className="flex items-center gap-0.5">
           <button
             type="button"
-            onClick={() => onSelectTool('SELECT')}
-            title="Pekeverktøy / Inspiser ruter"
-            className={`ttd-btn !px-1.5 !py-1 ${activeTool === 'SELECT' ? 'ttd-btn-active' : ''}`}
+            onClick={() => onToggleWindow('company_finances')}
+            title="Selskap AS – Resultatregnskap, Balanse og Banklån"
+            className={`ttd-btn !px-2 !h-[26px] ${
+              isBankruptWarning
+                ? 'ttd-cash-negative'
+                : openWindows.has('company_finances')
+                ? 'ttd-btn-active'
+                : ''
+            }`}
           >
-            <MousePointer className="w-3.5 h-3.5" />
+            <Building2 className="w-3.5 h-3.5 text-sky-300" />
+            <span>Selskap AS</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleWindow('personal_finances')}
+            title="Personlig økonomi & progressiv skatt (Eier)"
+            className={`ttd-btn ttd-btn-brass !px-2 !h-[26px] ${
+              openWindows.has('personal_finances') ? 'ttd-btn-active' : ''
+            }`}
+          >
+            <Wallet className="w-3.5 h-3.5 text-amber-200" />
+            <span>Privat & Skatt</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleWindow('hq')}
+            title="Hovedkontor (Nivå 1–5 betalt privat)"
+            className={`ttd-btn !px-1.5 !h-[26px] ttd-num ${
+              openWindows.has('hq') || activeTool === 'PLACE_HQ'
+                ? 'ttd-btn-active'
+                : ''
+            }`}
+          >
+            <Landmark className="w-3.5 h-3.5 text-amber-300" />
+            <span>HQ{hqTier > 0 ? ` ${hqTier}` : ''}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleWindow('stock_market')}
+            title="Oslo Børs – Aksjemarked & AI-konkurrenter"
+            className={`ttd-btn !px-1.5 !h-[26px] ${
+              openWindows.has('stock_market') ? 'ttd-btn-active' : ''
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5 text-emerald-300" />
+            <span>Børs</span>
           </button>
         </div>
 
-        {/* Construction & Map Group */}
-        <div className="flex items-center gap-1">
+        <div className="ttd-divider" />
+
+        {/* [Byer & Industrier] [Tog & Biler] */}
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => onToggleWindow('directory')}
+            title="Byer, industrier og stasjonsoversikt"
+            className={`ttd-btn !px-1.5 !h-[26px] ${
+              openWindows.has('directory') ? 'ttd-btn-active' : ''
+            }`}
+          >
+            <MapPin className="w-3.5 h-3.5 text-emerald-300" />
+            <span className="hidden 2xl:inline">Byer & Industrier</span>
+            <span className="2xl:hidden">Byer & Kart</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onToggleWindow('vehicles')}
+            title="Alle dine tog, busser og lastebiler"
+            className={`ttd-btn !px-1.5 !h-[26px] ttd-num ${
+              openWindows.has('vehicles') ? 'ttd-btn-active' : ''
+            }`}
+          >
+            <TrainFront className="w-3.5 h-3.5 text-sky-300" />
+            <span>Flåte ({playerVehicleCount})</span>
+          </button>
+        </div>
+
+        <div className="ttd-divider" />
+
+        {/* [Jernbane] [Vei] [Rive] */}
+        <div className="flex items-center gap-0.5">
           <button
             type="button"
             onClick={() => onToggleWindow('rail_palette')}
             title="Bygg jernbane, togstasjoner, signaler og togdepot"
-            className={`ttd-btn ttd-btn-teal !py-1 ${
-              openWindows.has('rail_palette') || isRailTool ? 'ttd-btn-active' : ''
+            className={`ttd-btn ttd-btn-green !px-2 !h-[26px] ${
+              openWindows.has('rail_palette') || isRailTool
+                ? 'ttd-btn-active'
+                : ''
             }`}
           >
             <TrainFront className="w-3.5 h-3.5" />
@@ -183,8 +314,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             type="button"
             onClick={() => onToggleWindow('road_palette')}
             title="Bygg vei, bussholdeplass, lasteterminal og bildepot"
-            className={`ttd-btn ttd-btn-teal !py-1 ${
-              openWindows.has('road_palette') || isRoadTool ? 'ttd-btn-active' : ''
+            className={`ttd-btn ttd-btn-green !px-2 !h-[26px] ${
+              openWindows.has('road_palette') || isRoadTool
+                ? 'ttd-btn-active'
+                : ''
             }`}
           >
             <Truck className="w-3.5 h-3.5" />
@@ -193,120 +326,58 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
           <button
             type="button"
-            onClick={() => onToggleWindow('directory')}
-            title="Byer, industrier og stasjonsoversikt"
-            className={`ttd-btn !py-1 ${openWindows.has('directory') ? 'ttd-btn-active' : ''}`}
+            onClick={() =>
+              onSelectTool(activeTool === 'BULLDOZE' ? 'SELECT' : 'BULLDOZE')
+            }
+            title="Rive / Bulldoser felt"
+            className={`ttd-btn ttd-btn-red !px-1.5 !h-[26px] ${
+              activeTool === 'BULLDOZE' ? 'ttd-btn-active' : ''
+            }`}
           >
-            <MapPin className="w-3.5 h-3.5 text-emerald-300" />
-            <span>Byer & Kart</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onToggleWindow('vehicles')}
-            title="Alle dine tog, busser og lastebiler"
-            className={`ttd-btn !py-1 ${openWindows.has('vehicles') ? 'ttd-btn-active' : ''}`}
-          >
-            <TrainFront className="w-3.5 h-3.5 text-sky-300" />
-            <span>Kjøretøy ({playerVehicleCount})</span>
+            <Hammer className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">Rive</span>
           </button>
         </div>
       </div>
 
-      {/* Right: Dual Economy, HQ, Stock Market, Save, Classroom, Dev */}
-      <div className="flex items-center gap-1 flex-wrap">
-        <button
-          type="button"
-          onClick={() => onToggleWindow('company_finances')}
-          title="Selskapsøkonomi AS – Resultatregnskap, Balanse og Banklån"
-          className={`ttd-btn !py-1 ${
-            isBankruptWarning
-              ? 'ttd-cash-negative'
-              : openWindows.has('company_finances')
-              ? 'ttd-btn-active'
-              : ''
-          }`}
-        >
-          <Building2 className="w-3.5 h-3.5 text-sky-300" />
-          <span>Selskap AS</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onToggleWindow('personal_finances')}
-          title="Personlig økonomi & progressiv skatt (Eier)"
-          className={`ttd-btn ttd-btn-brass !py-1 ${
-            openWindows.has('personal_finances') ? 'ttd-btn-active' : ''
-          }`}
-        >
-          <Wallet className="w-3.5 h-3.5 text-amber-200" />
-          <span>Privat & Skatt</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onToggleWindow('hq')}
-          title="Hovedkontor (Nivå 1–5 betalt med privat kapital)"
-          className={`ttd-btn !py-1 ${
-            openWindows.has('hq') || activeTool === 'PLACE_HQ' ? 'ttd-btn-active' : ''
-          }`}
-        >
-          <Landmark className="w-3.5 h-3.5 text-amber-300" />
-          <span>HQ {hqTier > 0 ? `(Nivå ${hqTier})` : ''}</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onToggleWindow('stock_market')}
-          title="Børs / Aksjemarked – invester privat i AI-konkurrenter"
-          className={`ttd-btn !py-1 ${openWindows.has('stock_market') ? 'ttd-btn-active' : ''}`}
-        >
-          <TrendingUp className="w-3.5 h-3.5 text-emerald-300" />
-          <span>Aksjemarked</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onToggleWindow('save_load')}
-          title="Lagre / Last inn spill / Nytt scenario"
-          className={`ttd-btn !py-1 ${openWindows.has('save_load') ? 'ttd-btn-active' : ''}`}
-        >
-          <Save className="w-3.5 h-3.5 text-slate-200" />
-          <span>Lagre</span>
-        </button>
-
+      {/* Right Cluster: [PIN Klasserom] [Test] */}
+      <div className="flex items-center gap-0.5 shrink-0">
         <button
           type="button"
           onClick={() => onToggleWindow('classroom')}
           title="Lærer / Klasserom – Live PIN-økt og ledertavle"
-          className={`ttd-btn ${connectedPin ? 'ttd-btn-green' : ''} !py-1 ${
+          className={`ttd-btn ${
+            connectedPin ? 'ttd-btn-green' : 'ttd-btn-teal'
+          } !px-2 !h-[26px] ${
             openWindows.has('classroom') ? 'ttd-btn-active' : ''
           }`}
         >
           <GraduationCap className="w-3.5 h-3.5 text-amber-200" />
           {connectedPin ? (
             <span className="flex items-center gap-1 ttd-num">
-              <span className="w-2 h-2 rounded-full bg-emerald-300 animate-pulse" />
+              <span className="w-1.5 h-1.5 bg-amber-300 animate-pulse" />
               <span>PIN {connectedPin}</span>
               {classroomRemainingSec !== null && (
-                <span className="bg-black/35 px-1 py-0.2 rounded text-[11px] text-amber-200">
+                <span className="bg-black/45 px-1 text-[10px] text-amber-200">
                   {formatCountdown(classroomRemainingSec)}
                 </span>
               )}
             </span>
           ) : (
-            <span>Lærer / Klasserom</span>
+            <span>Klasserom</span>
           )}
         </button>
 
         <button
           type="button"
           onClick={() => onToggleWindow('quick_test')}
-          title="Hurtigtest & Hjelp for lærere og elever"
-          className={`ttd-btn !py-1 ${openWindows.has('quick_test') ? 'ttd-btn-active' : ''}`}
+          title="Hurtigtest & 4-stegs oppstartsguide"
+          className={`ttd-btn !px-1.5 !h-[26px] ${
+            openWindows.has('quick_test') ? 'ttd-btn-active' : ''
+          }`}
         >
-          <Wrench className="w-3.5 h-3.5 text-orange-300" />
-          <span>Dev / Test</span>
+          <Wrench className="w-3.5 h-3.5 text-amber-300" />
+          <span>Test</span>
         </button>
       </div>
     </header>

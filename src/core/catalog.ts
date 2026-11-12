@@ -2,6 +2,7 @@ import {
   CargoType,
   HQTierSpec,
   IndustryType,
+  StationKind,
   ToolType,
   VehicleCatalogItem,
   VehicleModelId,
@@ -60,62 +61,62 @@ export const BUILD_COSTS: Record<ToolType, number> = {
 export const VEHICLE_CATALOG: Record<VehicleModelId, VehicleCatalogItem> = {
   BUS_CITY: {
     id: 'BUS_CITY',
-    name: 'Scania City Bus',
-    nameNo: 'Scania Bybuss',
+    name: 'MPS / Scania Regal Bus',
+    nameNo: 'MPS / Scania Regal Buss',
     network: 'ROAD',
-    price: 85_000,
+    price: 65_000,
     wagonPrice: 0,
-    maxSpeedKmh: 75,
-    baseCapacity: 40,
+    maxSpeedKmh: 56,
+    baseCapacity: 32,
     capacityPerWagon: 0,
-    annualRunningCost: 18_000,
+    annualRunningCost: 13_200,
     runningCostPerWagon: 0,
     supportedCargos: ['PASSENGERS'],
     defaultCargo: 'PASSENGERS',
-    description: 'Pålitelig by- og intercitybuss for passasjertrafikk mellom byer.',
+    description: 'Klassisk rutebuss for jevn lokal- og intercitytrafikk mellom byer.',
   },
   TRUCK_CARGO: {
     id: 'TRUCK_CARGO',
-    name: 'Volvo Cargo Truck',
-    nameNo: 'Volvo Lastebil',
+    name: 'Volvo Titan Cargo Truck',
+    nameNo: 'Volvo Titan Lastebil',
     network: 'ROAD',
-    price: 95_000,
+    price: 72_000,
     wagonPrice: 0,
-    maxSpeedKmh: 70,
-    baseCapacity: 28,
+    maxSpeedKmh: 54,
+    baseCapacity: 25,
     capacityPerWagon: 0,
-    annualRunningCost: 21_600,
+    annualRunningCost: 14_400,
     runningCostPerWagon: 0,
     supportedCargos: ['COAL', 'WOOD', 'GOODS', 'GRAIN', 'FOOD', 'MAIL'],
     defaultCargo: 'WOOD',
-    description: 'Fleksibel godslastebil som kan frakte råvarer, varer, mat og post.',
+    description: 'Solid godslastebil som kan frakte råvarer, varer, mat og post.',
   },
   LOCO_STEAM: {
     id: 'LOCO_STEAM',
     name: 'NSB Type 26 Steam',
     nameNo: 'NSB Type 26 Damplok',
     network: 'RAIL',
-    price: 240_000,
-    wagonPrice: 35_000,
-    maxSpeedKmh: 90,
+    price: 230_000,
+    wagonPrice: 32_000,
+    maxSpeedKmh: 88,
     baseCapacity: 0,
-    capacityPerWagon: 35,
+    capacityPerWagon: 32,
     annualRunningCost: 54_000,
     runningCostPerWagon: 6_000,
     supportedCargos: ['COAL', 'WOOD', 'GOODS', 'GRAIN', 'FOOD', 'PASSENGERS', 'MAIL'],
     defaultCargo: 'COAL',
-    description: 'Rimelig og sterkt damplokomotiv. Perfekt for første kull- eller tømmerlinje.',
+    description: 'Rimelig og sterkt damplokomotiv. Perfekt for tunge kull- og tømmerlinjer.',
   },
   LOCO_DIESEL: {
     id: 'LOCO_DIESEL',
     name: 'NSB Di 3 Nohab Diesel',
     nameNo: 'NSB Di 3 Diesellok',
     network: 'RAIL',
-    price: 390_000,
-    wagonPrice: 40_000,
-    maxSpeedKmh: 125,
+    price: 380_000,
+    wagonPrice: 38_000,
+    maxSpeedKmh: 128,
     baseCapacity: 0,
-    capacityPerWagon: 40,
+    capacityPerWagon: 38,
     annualRunningCost: 78_000,
     runningCostPerWagon: 7_200,
     supportedCargos: ['COAL', 'WOOD', 'GOODS', 'GRAIN', 'FOOD', 'PASSENGERS', 'MAIL'],
@@ -127,11 +128,11 @@ export const VEHICLE_CATALOG: Record<VehicleModelId, VehicleCatalogItem> = {
     name: 'NSB El 18 Express',
     nameNo: 'NSB El 18 El-lok',
     network: 'RAIL',
-    price: 580_000,
-    wagonPrice: 45_000,
-    maxSpeedKmh: 165,
+    price: 560_000,
+    wagonPrice: 44_000,
+    maxSpeedKmh: 175,
     baseCapacity: 0,
-    capacityPerWagon: 45,
+    capacityPerWagon: 42,
     annualRunningCost: 102_000,
     runningCostPerWagon: 8_400,
     supportedCargos: ['PASSENGERS', 'MAIL', 'GOODS', 'FOOD', 'COAL', 'WOOD', 'GRAIN'],
@@ -200,10 +201,18 @@ export const INITIAL_MONTHLY_GROSS_SALARY_KR = 30_000;
 export const MAX_MONTHLY_GROSS_SALARY_KR = 150_000;
 
 export const STATION_CATCHMENT_RADIUS = 4;
+export const ROAD_STATION_CATCHMENT_RADIUS = 3;
+export const RAIL_STATION_CATCHMENT_RADIUS = 4;
 export const HQ_BONUS_RADIUS = 18;
 export const TOTAL_AI_SHARES = 10_000;
 export const MAX_PLAYER_AI_SHARE_PCT = 75;
 export const AI_SHARE_BLOCK_PCT = 10;
+
+export function getStationCatchmentRadius(kind: StationKind): number {
+  return kind === 'TRAIN_STATION'
+    ? RAIL_STATION_CATCHMENT_RADIUS
+    : ROAD_STATION_CATCHMENT_RADIUS;
+}
 
 export function calculateVehiclePurchaseCost(
   modelId: VehicleModelId,

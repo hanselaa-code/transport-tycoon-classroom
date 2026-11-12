@@ -14,6 +14,7 @@ import {
   ScenarioType,
   Station,
   StationKind,
+  TileInspectionInfo,
   ToolType,
   Vehicle,
   VehicleModelId,
@@ -24,6 +25,7 @@ import {
   runMonthlyAICompetitorsTick,
 } from './aiCompetitors';
 import {
+  ALL_CARGO_TYPES,
   BUILD_COSTS,
   calculateVehicleBaseAnnualCost,
   calculateVehicleCapacity,
@@ -34,6 +36,8 @@ import {
   formatGameDate,
   formatKr,
   formatNorwegianNumber,
+  getHQTierSpec,
+  INDUSTRY_LABELS_NO,
   VEHICLE_CATALOG,
 } from './catalog';
 import {
@@ -43,6 +47,7 @@ import {
   createInitialPersonalFinance,
   distributePeriodicCargoOutput,
   doesStationAcceptCargo,
+  doesStationCatchmentProduceCargo,
   payQuarterlyDividends,
   placeHQAtTile,
   pushNews,
@@ -78,8 +83,9 @@ import {
   serializeGameState,
 } from './saveManager';
 
-const SUBTICKS_PER_GAME_DAY = 8;
+const SUBTICKS_PER_GAME_DAY = 14;
 const POPUP_LIFETIME_MS = 2600;
+const FULL_LOAD_MAX_WAIT_SUBTICKS = 120;
 
 export interface ApplyToolOptions {
   stationLength?: number;
@@ -205,7 +211,7 @@ export class GameEngine {
       }
       this.pruneExpiredPopups();
       this.emit();
-    }, 85);
+    }, 100);
   }
 
   public stopLoop(): void {
@@ -441,16 +447,24 @@ export class GameEngine {
       if (!check.allowed) {
         vehicle.state = 'WAITING_SIGNAL';
         vehicle.speedKmh = 0;
+        vehicle.accelTicks = 0;
         vehicle.nextX = vehicle.x;
         vehicle.nextY = vehicle.y;
         return;
       }
     }
 
+    const prevDir = vehicle.direction;
+    const nextDir = Math.atan2(nextStep.y - vehicle.y, nextStep.x - vehicle.x);
+    const isTurning =
+      vehicle.progress === 0 &&
+      (vehicle.accelTicks ?? 4) > 0 &&
+      Math.abs(nextDir - prevDir) > 0.05;
+
     vehicle.state = 'MOVING';
     vehicle.nextX = nextStep.x;
     vehicle.nextY = nextStep.y;
-    vehicle.direction = Math.atan2(nextStep.y - vehicle.y, nextStep.x - vehicle.x);
+    vehicle.direction = nextDir;
 
     const curTile = this.state.tiles[tileIndex(vehicle.x, vehicle.y, this.state.mapSize)];
     const nextTile = this.state.tiles[tileIndex(nextStep.x, nextStep.y, this.state.mapSize)];
@@ -460,9 +474,20 @@ export class GameEngine {
       vehicle.network === 'RAIL' ? 'rail' : 'road'
     );
 
-    vehicle.speedKmh = Math.max(18, Math.round(vehicle.maxSpeedKmh * slopeFactor));
+    // Gradual acceleration over ~4 subticks after departing a station/signal + 0.78x cornering drag
+    const accelStep = Math.min(4, (vehicle.accelTicks ?? 4) + 1);
+    vehicle.accelTicks = accelStep;
+    const accelFactor = 0.36 + (accelStep / 4) * 0.64;
+    const cornerFactor = isTurning ? 0.78 : 1.0;
 
-    const stepProgress = Math.min(0.85, vehicle.speedKmh / 210);
+    const effectiveSpeedKmh = Math.max(
+      10,
+      Math.round(vehicle.maxSpeedKmh * slopeFactor * accelFactor * cornerFactor)
+    );
+    vehicle.speedKmh = effectiveSpeedKmh;
+
+    // At 100ms/subtick (1x): 56 km/h bus -> 56 / 620 * 10 = 0.903 tiles/sec (~22s for 20 tiles)
+    const stepProgress = Math.min(0.75, effectiveSpeedKmh / 620);
     vehicle.progress += stepProgress;
 
     if (vehicle.progress >= 1.0) {
@@ -490,9 +515,11 @@ export class GameEngine {
       vehicle.state = 'LOADING';
       vehicle.speedKmh = 0;
       vehicle.progress = 0;
+      vehicle.accelTicks = 0;
+      vehicle.fullLoadWaitTicks = 0;
       vehicle.nextX = vehicle.x;
       vehicle.nextY = vehicle.y;
-      vehicle.loadingTicksRemaining = 2;
+      vehicle.loadingTicksRemaining = 5;
 
       // 1. Unload & Deliver if carrying accepted cargo from a DIFFERENT station
       if (
@@ -562,7 +589,6 @@ export class GameEngine {
               );
               if (conv.outputCargo && conv.producedUnits > 0) {
                 targetInd.storedOutput += conv.producedUnits;
-                // Transfer half immediately to nearby station waitingCargo so platform & industry both reflect output
                 const outCargo = conv.outputCargo;
                 const servingStations = this.state.stations.filter(
                   (s) =>
@@ -607,10 +633,10 @@ export class GameEngine {
                 town.population += immediatePop;
                 town.growthCounter -= immediatePop;
                 town.monthlyPassengers = Math.max(
-                  25,
-                  Math.round(town.population * 0.14)
+                  14,
+                  Math.round(town.population * 0.06)
                 );
-                town.monthlyMail = Math.max(12, Math.round(town.population * 0.06));
+                town.monthlyMail = Math.max(6, Math.round(town.population * 0.025));
                 if (
                   expandTownBuildings(this.state.tiles, this.state.mapSize, town)
                 ) {
@@ -627,14 +653,16 @@ export class GameEngine {
       }
     }
 
-    // 2. Load Waiting Cargo of `vehicle.cargoType`
+    // 2. Gradual Loading of Waiting Cargo (`6..10` units per subtick, min 5 subticks dwell)
     station.daysSincePickup = 0;
     station.lastVehicleMaxSpeedKmh = vehicle.maxSpeedKmh;
 
     const available = station.waitingCargo[vehicle.cargoType] ?? 0;
     const freeSpace = vehicle.capacity - vehicle.cargoAmount;
+    const loadRatePerSubtick = vehicle.network === 'RAIL' ? 10 : 7;
+
     if (available > 0 && freeSpace > 0) {
-      const toLoad = Math.min(available, freeSpace);
+      const toLoad = Math.min(available, freeSpace, loadRatePerSubtick);
       station.waitingCargo[vehicle.cargoType] -= toLoad;
       if (vehicle.cargoAmount === 0) {
         vehicle.cargoOriginStationId = station.id;
@@ -643,11 +671,32 @@ export class GameEngine {
       vehicle.cargoAmount += toLoad;
     }
 
-    vehicle.loadingTicksRemaining = (vehicle.loadingTicksRemaining ?? 1) - 1;
-    if ((vehicle.loadingTicksRemaining ?? 0) <= 0) {
+    vehicle.loadingTicksRemaining = Math.max(
+      0,
+      (vehicle.loadingTicksRemaining ?? 1) - 1
+    );
+    vehicle.fullLoadWaitTicks = (vehicle.fullLoadWaitTicks ?? 0) + 1;
+
+    const remainingAtPlatform = station.waitingCargo[vehicle.cargoType] ?? 0;
+    const activelyBoardingAvailable =
+      remainingAtPlatform > 0 && vehicle.cargoAmount < vehicle.capacity;
+
+    const waitingForFullLoad =
+      Boolean(vehicle.waitForFullLoad) &&
+      vehicle.cargoAmount < vehicle.capacity &&
+      doesStationCatchmentProduceCargo(this.state, station, vehicle.cargoType) &&
+      (vehicle.fullLoadWaitTicks ?? 0) < FULL_LOAD_MAX_WAIT_SUBTICKS;
+
+    if (
+      (vehicle.loadingTicksRemaining ?? 0) <= 0 &&
+      !activelyBoardingAvailable &&
+      !waitingForFullLoad
+    ) {
       vehicle.currentOrderIndex =
         (vehicle.currentOrderIndex + 1) % Math.max(1, vehicle.orders.length);
       vehicle.state = 'MOVING';
+      vehicle.accelTicks = 0;
+      vehicle.fullLoadWaitTicks = 0;
       vehicle.path = [];
     }
   }
@@ -1170,6 +1219,8 @@ export class GameEngine {
     let depotY: number | undefined;
     let orders: string[] = [];
 
+    let waitForFullLoad = false;
+
     if (typeof paramsOrModel === 'string') {
       modelId = paramsOrModel;
       cargoType = cargoTypeArg;
@@ -1183,6 +1234,7 @@ export class GameEngine {
       depotX = paramsOrModel.depotX;
       depotY = paramsOrModel.depotY;
       orders = paramsOrModel.orders ?? [];
+      waitForFullLoad = Boolean(paramsOrModel.waitForFullLoad);
     }
 
     const spec = VEHICLE_CATALOG[modelId];
@@ -1284,6 +1336,9 @@ export class GameEngine {
       depotX: depotTile.x,
       depotY: depotTile.y,
       loadingTicksRemaining: 0,
+      waitForFullLoad,
+      accelTicks: 0,
+      fullLoadWaitTicks: 0,
     };
 
     this.state.vehicles.push(vehicle);
@@ -1374,6 +1429,181 @@ export class GameEngine {
       ok: true,
       vehicleId: vehicle.id,
       message: vehicle.state === 'STOPPED' ? 'Kjøretøy stoppet.' : 'Kjøretøy startet.',
+    };
+  }
+
+  public toggleVehicleFullLoad(vehicleId: string): ActionResult {
+    const vehicle = this.state.vehicles.find(
+      (v) => v.id === vehicleId && v.ownerId === 'player'
+    );
+    if (!vehicle) {
+      return { ok: false, message: 'Fant ikke kjøretøyet.' };
+    }
+
+    vehicle.waitForFullLoad = !vehicle.waitForFullLoad;
+    vehicle.fullLoadWaitTicks = 0;
+
+    this.emit();
+    return {
+      ok: true,
+      vehicleId: vehicle.id,
+      message: vehicle.waitForFullLoad
+        ? 'Vent på full last: PÅ.'
+        : 'Vent på full last: AV.',
+    };
+  }
+
+  public inspectTile(x: number, y: number): TileInspectionInfo | null {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    if (!inBounds(rx, ry, this.state.mapSize)) return null;
+
+    const tile = this.state.tiles[tileIndex(rx, ry, this.state.mapSize)];
+
+    // Check neighbor elevations for slope description
+    let minNeighborElev = tile.elevation;
+    let maxNeighborElev = tile.elevation;
+    for (const [dx, dy] of [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1],
+      [-1, -1],
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+    ]) {
+      const nx = rx + dx;
+      const ny = ry + dy;
+      if (!inBounds(nx, ny, this.state.mapSize)) continue;
+      const ne = this.state.tiles[tileIndex(nx, ny, this.state.mapSize)].elevation;
+      if (ne < minNeighborElev) minNeighborElev = ne;
+      if (ne > maxNeighborElev) maxNeighborElev = ne;
+    }
+
+    const isSloped =
+      tile.terrain !== 'WATER' && maxNeighborElev !== minNeighborElev;
+    const slopeLabelNo =
+      tile.terrain === 'WATER'
+        ? 'Havoverflate (0 m)'
+        : isSloped
+          ? `Skråning (Høyde ${tile.elevation}, ${tile.elevation * 50} moh.)`
+          : `Flatt lende (Høyde ${tile.elevation}, ${tile.elevation * 50} moh.)`;
+
+    const terrainLabels: Record<typeof tile.terrain, string> = {
+      WATER: 'Vann / Fjord',
+      SAND: 'Sandstrand / Kyst',
+      GRASS: 'Gressland',
+      FOREST_TREES: 'Skogholt',
+    };
+    const terrainLabelNo = terrainLabels[tile.terrain];
+
+    const town = tile.townId
+      ? this.state.towns.find((t) => t.id === tile.townId) ?? null
+      : null;
+    const industry = tile.industryId
+      ? this.state.industries.find((i) => i.id === tile.industryId) ?? null
+      : null;
+    const station = tile.stationId
+      ? this.state.stations.find((s) => s.id === tile.stationId) ?? null
+      : null;
+
+    let ownerName = 'Kommunal / Ingen eier';
+    if (tile.ownerId === 'player' || tile.hqOwnerId === 'player') {
+      ownerName = this.state.corporate.companyName;
+    } else if (tile.ownerId) {
+      const ai = this.state.aiCompanies.find((c) => c.id === tile.ownerId);
+      if (ai) ownerName = ai.name;
+    } else if (town) {
+      ownerName = `${town.name} kommune`;
+    } else if (industry) {
+      ownerName = industry.name;
+    }
+
+    const acceptsSet = new Set<CargoType>();
+    const producesSet = new Set<CargoType>();
+
+    if (station) {
+      for (const c of ALL_CARGO_TYPES) {
+        if (doesStationAcceptCargo(this.state, station, c).accepts) {
+          acceptsSet.add(c);
+        }
+        if (doesStationCatchmentProduceCargo(this.state, station, c)) {
+          producesSet.add(c);
+        }
+      }
+    } else if (industry) {
+      for (const acc of industry.accepts) acceptsSet.add(acc);
+      if (industry.produces) producesSet.add(industry.produces);
+    } else if ((tile.buildingTier ?? 0) > 0 && town) {
+      acceptsSet.add('PASSENGERS');
+      acceptsSet.add('MAIL');
+      if ((tile.buildingTier ?? 0) >= 2 || town.population >= 300) {
+        acceptsSet.add('GOODS');
+        acceptsSet.add('FOOD');
+      }
+      producesSet.add('PASSENGERS');
+      producesSet.add('MAIL');
+    }
+
+    let descriptionNo = terrainLabelNo;
+    if (tile.hqOwnerId === 'player') {
+      const hqSpec = getHQTierSpec(this.state.corporate.hqTier);
+      descriptionNo = `Hovedkontor: ${hqSpec ? hqSpec.nameNo : 'Nivå 1'}`;
+    } else if (station) {
+      descriptionNo = `Stasjon: ${station.name}`;
+    } else if (tile.depot === 'RAIL') {
+      descriptionNo = 'Togdepot';
+    } else if (tile.depot === 'ROAD') {
+      descriptionNo = 'Buss- og lastebildepot';
+    } else if (industry) {
+      descriptionNo = `Industri: ${industry.name} (${INDUSTRY_LABELS_NO[industry.type]})`;
+    } else if ((tile.buildingTier ?? 0) > 0 && town) {
+      const tierLabel =
+        tile.buildingTier === 3
+          ? 'Bygård / Forretningsbygg'
+          : tile.buildingTier === 2
+            ? 'Rekkehus / Bydel'
+            : 'Bolighus';
+      descriptionNo = `${town.name} — ${tierLabel}`;
+    } else if (tile.rail && tile.road) {
+      descriptionNo = 'Planovergang (Jernbane + Vei)';
+    } else if (tile.rail && tile.signal) {
+      descriptionNo = 'Jernbanespor med blokksignal';
+    } else if (tile.rail) {
+      descriptionNo = 'Jernbanespor';
+    } else if (tile.road) {
+      descriptionNo = town ? `Bygate (${town.name})` : 'Landevei';
+    }
+
+    return {
+      x: rx,
+      y: ry,
+      terrain: tile.terrain,
+      terrainLabelNo,
+      elevation: tile.elevation,
+      slopeLabelNo,
+      isSloped,
+      road: tile.road,
+      rail: tile.rail,
+      signal: tile.signal,
+      depot: tile.depot ?? null,
+      hqTier: tile.hqOwnerId === 'player' ? this.state.corporate.hqTier : null,
+      ownerId: tile.ownerId ?? null,
+      ownerName,
+      townId: town?.id ?? null,
+      townName: town?.name ?? null,
+      buildingTier: tile.buildingTier ?? 0,
+      industryId: industry?.id ?? null,
+      industryName: industry?.name ?? null,
+      industryType: industry?.type ?? null,
+      stationId: station?.id ?? null,
+      stationName: station?.name ?? null,
+      stationKind: station?.kind ?? null,
+      waitingCargo: station ? { ...station.waitingCargo } : null,
+      accepts: Array.from(acceptsSet),
+      produces: Array.from(producesSet),
+      descriptionNo,
     };
   }
 
