@@ -27,8 +27,14 @@ const THEME_CLASS: Record<TTDTitleTheme, string> = {
   crimson: 'ttd-titlebar-crimson',
 };
 
-const TOP_BAR_GUARD = 44;
 const BOTTOM_BAR_GUARD = 38;
+
+function getTopBarGuard(): number {
+  if (typeof document === 'undefined') return 86;
+  const headerEl = document.querySelector('header');
+  const headerH = headerEl ? headerEl.getBoundingClientRect().height : 80;
+  return Math.max(44, Math.ceil(headerH > 0 ? headerH : 80) + 6);
+}
 
 export const TTDWindow: React.FC<TTDWindowProps> = ({
   id,
@@ -48,12 +54,13 @@ export const TTDWindow: React.FC<TTDWindowProps> = ({
   const clampPosition = (x: number, y: number, w: number) => {
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1366;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+    const topGuard = getTopBarGuard();
     const effectiveW = Math.min(w, vw - 16);
     const maxX = Math.max(8, vw - effectiveW - 8);
-    const maxY = Math.max(TOP_BAR_GUARD + 4, vh - BOTTOM_BAR_GUARD - 36);
+    const maxY = Math.max(topGuard, vh - BOTTOM_BAR_GUARD - 36);
     return {
       x: Math.max(8, Math.min(maxX, x)),
-      y: Math.max(TOP_BAR_GUARD + 4, Math.min(maxY, y)),
+      y: Math.max(topGuard, Math.min(maxY, y)),
     };
   };
 
@@ -75,11 +82,31 @@ export const TTDWindow: React.FC<TTDWindowProps> = ({
   });
 
   useEffect(() => {
-    const handleResize = () => {
+    const handleReclamp = () => {
       setPos((prev) => clampPosition(prev.x, prev.y, width));
     };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    // Re-clamp immediately after mount once <header> layout is committed
+    handleReclamp();
+
+    window.addEventListener('resize', handleReclamp);
+
+    let observer: ResizeObserver | null = null;
+    const headerEl =
+      typeof document !== 'undefined' ? document.querySelector('header') : null;
+    if (headerEl && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        handleReclamp();
+      });
+      observer.observe(headerEl);
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleReclamp);
+      if (observer) {
+        observer.disconnect();
+      }
+    };
   }, [width]);
 
   const handleHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {

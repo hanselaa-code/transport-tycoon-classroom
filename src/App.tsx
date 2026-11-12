@@ -488,7 +488,7 @@ export const App: React.FC = () => {
 
       {/* Auto-load Resume Banner with "Start Fresh" button */}
       {showResumeBanner && (
-        <div className="fixed top-12 left-1/2 -translate-x-1/2 z-[850] ttd-window px-3 py-1.5 flex items-center gap-3 text-xs">
+        <div className="fixed top-22 2xl:top-12 left-1/2 -translate-x-1/2 z-[850] ttd-window px-3 py-1.5 flex items-center gap-3 text-xs">
           <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
           <span>
             Lastet automatisk lagret spill (<strong>{state.corporate.companyName}</strong>,{' '}
