@@ -157,6 +157,49 @@ export type VehicleState =
   | 'STOPPED'
   | 'IN_DEPOT';
 
+export interface TrainWagon {
+  id: string;
+  cargoType: CargoType;
+  capacity: number;
+  cargoAmount: number;
+  cargoOriginStationId: string | null;
+  cargoLoadedDay: number;
+  purchaseValue: number;
+  annualRunningCost: number;
+}
+
+export interface DepotStoredWagon {
+  id: string;
+  depotX: number;
+  depotY: number;
+  cargoType: CargoType;
+  capacity: number;
+  purchaseValue: number;
+  annualRunningCost: number;
+}
+
+export interface RailWagonSpec {
+  cargoType: CargoType;
+  nameNo: string;
+  shortNameNo: string;
+  price: number;
+  capacity: number;
+  annualRunningCost: number;
+  descriptionNo: string;
+}
+
+export interface RoadVehicleShopSpec {
+  shopId: string;
+  modelId: 'BUS_CITY' | 'TRUCK_CARGO';
+  cargoType: CargoType;
+  nameNo: string;
+  price: number;
+  capacity: number;
+  maxSpeedKmh: number;
+  annualRunningCost: number;
+  descriptionNo: string;
+}
+
 export interface Vehicle {
   id: string;
   name: string;
@@ -185,6 +228,10 @@ export interface Vehicle {
   purchaseValue: number;
   ageMonths: number;
   wagonCount: number;
+  wagons?: TrainWagon[];
+  goingToDepot?: { x: number; y: number } | null;
+  wt?: CargoType[];
+  baseAnnualRunningCost?: number;
   trail?: Array<{ x: number; y: number }>;
   depotX?: number;
   depotY?: number;
@@ -396,6 +443,10 @@ export interface ModifiedTileDelta {
   hqOwnerTier?: number;
 }
 
+export interface RemoteVehicleSnapshot extends Vehicle {
+  wt?: CargoType[];
+}
+
 export interface RemotePlayerWorldSlice {
   clientId: string;
   ownerName: string;
@@ -408,7 +459,7 @@ export interface RemotePlayerWorldSlice {
   hqTier: number;
   modifiedTiles: ModifiedTileDelta[];
   stations: Station[];
-  vehicles: Vehicle[];
+  vehicles: RemoteVehicleSnapshot[];
   updatedAt?: number;
 }
 
@@ -426,6 +477,7 @@ export interface GameState {
   industries: Industry[];
   stations: Station[];
   vehicles: Vehicle[];
+  depotWagons?: DepotStoredWagon[];
   popups: FloatingPopup[];
   date: GameDate;
   speed: GameSpeed;

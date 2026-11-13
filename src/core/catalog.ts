@@ -4,8 +4,11 @@ import {
   CargoType,
   HQTierSpec,
   IndustryType,
+  RailWagonSpec,
+  RoadVehicleShopSpec,
   StationKind,
   ToolType,
+  Vehicle,
   VehicleCatalogItem,
   VehicleModelId,
   WorldSetupConfig,
@@ -206,6 +209,172 @@ export const VEHICLE_CATALOG: Record<VehicleModelId, VehicleCatalogItem> = {
 
 export const VEHICLE_CATALOG_LIST: VehicleCatalogItem[] = Object.values(VEHICLE_CATALOG);
 
+export const MAX_TRAIN_WAGONS = 8;
+export const ROAD_REFIT_COST_KR = 5_000;
+
+export const RAIL_WAGON_CATALOG: Record<CargoType, RailWagonSpec> = {
+  PASSENGERS: {
+    cargoType: 'PASSENGERS',
+    nameNo: 'Passasjervogn (InterCity)',
+    shortNameNo: 'Pass.vogn',
+    price: 36_000,
+    capacity: 40,
+    annualRunningCost: 6_600,
+    descriptionNo: 'Komfortabel personvogn for passasjertrafikk mellom byer.',
+  },
+  MAIL: {
+    cargoType: 'MAIL',
+    nameNo: 'Postvogn (Posten Ekspress)',
+    shortNameNo: 'Postvogn',
+    price: 34_000,
+    capacity: 30,
+    annualRunningCost: 6_000,
+    descriptionNo:
+      'Rask ekspressvogn for postsekker – perfekt i kombinasjon med passasjervogner!',
+  },
+  COAL: {
+    cargoType: 'COAL',
+    nameNo: 'Kullvogn (Åpen malmvogn)',
+    shortNameNo: 'Kullvogn',
+    price: 32_000,
+    capacity: 35,
+    annualRunningCost: 6_000,
+    descriptionNo:
+      'Solid åpen bunntømmervogn for kull fra gruve til kraftverk.',
+  },
+  WOOD: {
+    cargoType: 'WOOD',
+    nameNo: 'Tømmervogn (Staurvogn)',
+    shortNameNo: 'Tømmervogn',
+    price: 32_000,
+    capacity: 35,
+    annualRunningCost: 6_000,
+    descriptionNo:
+      'Flatvogn med stålstaur for tømmerstokker fra skog til sagbruk.',
+  },
+  GOODS: {
+    cargoType: 'GOODS',
+    nameNo: 'Containervogn (Varer)',
+    shortNameNo: 'Godsvogn',
+    price: 38_000,
+    capacity: 35,
+    annualRunningCost: 7_200,
+    descriptionNo:
+      'Intermodal containervogn for ferdigvarer fra sagbruk til by.',
+  },
+  GRAIN: {
+    cargoType: 'GRAIN',
+    nameNo: 'Kornvogn (Lukket silovogn)',
+    shortNameNo: 'Kornvogn',
+    price: 34_000,
+    capacity: 35,
+    annualRunningCost: 6_400,
+    descriptionNo:
+      'Værbeskyttet silovogn for korn fra gård til matfabrikk.',
+  },
+  FOOD: {
+    cargoType: 'FOOD',
+    nameNo: 'Kjølevogn (Matvarer)',
+    shortNameNo: 'Kjølevogn',
+    price: 40_000,
+    capacity: 32,
+    annualRunningCost: 7_800,
+    descriptionNo:
+      'Isolert termovogn som holder matvarer ferske helt frem til byen.',
+  },
+};
+
+export const RAIL_WAGON_CATALOG_LIST: RailWagonSpec[] = ALL_CARGO_TYPES.map(
+  (cargoType) => RAIL_WAGON_CATALOG[cargoType]
+);
+
+export const ROAD_VEHICLE_SHOP_LIST: RoadVehicleShopSpec[] = [
+  {
+    shopId: 'ROAD_PASSENGERS',
+    modelId: 'BUS_CITY',
+    cargoType: 'PASSENGERS',
+    nameNo: 'MPS / Scania Rutebuss',
+    price: 65_000,
+    capacity: 32,
+    maxSpeedKmh: 56,
+    annualRunningCost: 13_200,
+    descriptionNo:
+      'Klassisk rutebuss for jevn lokal- og intercitytrafikk mellom byer.',
+  },
+  {
+    shopId: 'ROAD_MAIL',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'MAIL',
+    nameNo: 'Posten Ekspress Postbil',
+    price: 68_000,
+    capacity: 28,
+    maxSpeedKmh: 56,
+    annualRunningCost: 13_800,
+    descriptionNo:
+      'Rask lukket postbil for postsekker og ekspresspakker mellom byer.',
+  },
+  {
+    shopId: 'ROAD_COAL',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'COAL',
+    nameNo: 'Volvo Titan Kull-tippbil',
+    price: 72_000,
+    capacity: 25,
+    maxSpeedKmh: 54,
+    annualRunningCost: 14_400,
+    descriptionNo:
+      'Solid tippbil med høye karmer for kulltransport fra gruve til kraftverk.',
+  },
+  {
+    shopId: 'ROAD_WOOD',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'WOOD',
+    nameNo: 'Volvo Titan Tømmerbil',
+    price: 72_000,
+    capacity: 25,
+    maxSpeedKmh: 54,
+    annualRunningCost: 14_400,
+    descriptionNo:
+      'Tømmerbil med staur for tømmerstokker fra skogbruk til sagbruk.',
+  },
+  {
+    shopId: 'ROAD_GOODS',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'GOODS',
+    nameNo: 'Scania Varelastebil',
+    price: 75_000,
+    capacity: 25,
+    maxSpeedKmh: 55,
+    annualRunningCost: 14_800,
+    descriptionNo:
+      'Lukket skapbil for ferdigvarer fra sagbruk til byens butikker.',
+  },
+  {
+    shopId: 'ROAD_GRAIN',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'GRAIN',
+    nameNo: 'Volvo Korn-bulkbil',
+    price: 72_000,
+    capacity: 25,
+    maxSpeedKmh: 54,
+    annualRunningCost: 14_400,
+    descriptionNo:
+      'Værbeskyttet kornbil med kapell for korn fra gård til matfabrikk.',
+  },
+  {
+    shopId: 'ROAD_FOOD',
+    modelId: 'TRUCK_CARGO',
+    cargoType: 'FOOD',
+    nameNo: 'Termo Kjølebil (Matvarer)',
+    price: 78_000,
+    capacity: 24,
+    maxSpeedKmh: 55,
+    annualRunningCost: 15_600,
+    descriptionNo:
+      'Isolert kjølebil med aggregat som leverer ferske matvarer til byen.',
+  },
+];
+
 export const HQ_TIERS: HQTierSpec[] = [
   {
     tier: 1,
@@ -285,6 +454,9 @@ export function calculateVehiclePurchaseCost(
   if (spec.network === 'ROAD') {
     return spec.price;
   }
+  if (Math.round(wagonCount) <= 0) {
+    return spec.price;
+  }
   const clampedWagons = Math.max(1, Math.min(6, Math.round(wagonCount)));
   return spec.price + spec.wagonPrice * clampedWagons;
 }
@@ -296,6 +468,9 @@ export function calculateVehicleCapacity(
   const spec = VEHICLE_CATALOG[modelId];
   if (spec.network === 'ROAD') {
     return spec.baseCapacity;
+  }
+  if (Math.round(wagonCount) <= 0) {
+    return 0;
   }
   const clampedWagons = Math.max(1, Math.min(6, Math.round(wagonCount)));
   return spec.baseCapacity + spec.capacityPerWagon * clampedWagons;
@@ -309,8 +484,26 @@ export function calculateVehicleBaseAnnualCost(
   if (spec.network === 'ROAD') {
     return spec.annualRunningCost;
   }
+  if (Math.round(wagonCount) <= 0) {
+    return spec.annualRunningCost;
+  }
   const clampedWagons = Math.max(1, Math.min(6, Math.round(wagonCount)));
   return spec.annualRunningCost + spec.runningCostPerWagon * clampedWagons;
+}
+
+export function getVehicleAnnualRunningCost(vehicle: Vehicle): number {
+  if (typeof vehicle.baseAnnualRunningCost === 'number' && vehicle.baseAnnualRunningCost > 0) {
+    return vehicle.baseAnnualRunningCost;
+  }
+  const spec = VEHICLE_CATALOG[vehicle.modelId];
+  if (vehicle.network === 'RAIL' && Array.isArray(vehicle.wagons)) {
+    const wagonsAnnual = vehicle.wagons.reduce(
+      (sum, w) => sum + w.annualRunningCost,
+      0
+    );
+    return spec.annualRunningCost + wagonsAnnual;
+  }
+  return calculateVehicleBaseAnnualCost(vehicle.modelId, vehicle.wagonCount);
 }
 
 export function getHQTierSpec(tier: number): HQTierSpec | undefined {

@@ -9,6 +9,7 @@ import {
   BuyVehicleParams,
   CargoType,
   DemoRouteType,
+  DepotStoredWagon,
   FloatingPopup,
   GameSpeed,
   GameState,
@@ -16,6 +17,7 @@ import {
   MapSizeOption,
   ModifiedTileDelta,
   RemotePlayerWorldSlice,
+  RemoteVehicleSnapshot,
   ScenarioType,
   Station,
   StationDetailsInfo,
@@ -23,6 +25,7 @@ import {
   Tile,
   TileInspectionInfo,
   ToolType,
+  TrainWagon,
   Vehicle,
   VehicleModelId,
   WorldSetupConfig,
@@ -49,6 +52,10 @@ import {
   formatNorwegianNumber,
   getHQTierSpec,
   INDUSTRY_LABELS_NO,
+  MAX_TRAIN_WAGONS,
+  RAIL_WAGON_CATALOG,
+  ROAD_REFIT_COST_KR,
+  ROAD_VEHICLE_SHOP_LIST,
   VEHICLE_CATALOG,
 } from './catalog';
 import {
@@ -187,6 +194,14 @@ export class GameEngine {
       const saved = loadStateFromLocalStorage();
       if (saved) {
         this.state = saved;
+        if (!Array.isArray(this.state.depotWagons)) {
+          this.state.depotWagons = [];
+        }
+        for (const v of this.state.vehicles) {
+          if (v.network === 'RAIL') {
+            this.ensureTrainWagons(v);
+          }
+        }
         if (saved.worldSetup) {
           this.worldSetup = resolveWorldSetup(saved.worldSetup);
           this.seed = this.worldSetup.seed;
@@ -240,6 +255,7 @@ export class GameEngine {
       industries: world.industries,
       stations: [],
       vehicles: [],
+      depotWagons: [],
       popups: [],
       date: {
         day: 1,
@@ -289,6 +305,8 @@ export class GameEngine {
     // Create shallow top-level reference copy so React `useState` / `useSyncExternalStore` always re-renders cleanly
     this.state = {
       ...this.state,
+      vehicles: [...this.state.vehicles],
+      depotWagons: [...(this.state.depotWagons ?? [])],
       date: { ...this.state.date },
       corporate: {
         ...this.state.corporate,
@@ -436,40 +454,188 @@ export class GameEngine {
     }
   }
 
+  public ensureTrainWagons(vehicle: Vehicle): TrainWagon[] {
+    if (vehicle.network !== 'RAIL') return [];
+    if (Array.isArray(vehicle.wagons)) {
+      return vehicle.wagons;
+    }
+
+    const spec = VEHICLE_CATALOG[vehicle.modelId] ?? VEHICLE_CATALOG.LOCO_STEAM;
+    const count = Math.max(0, Math.round(vehicle.wagonCount ?? 0));
+    const perWagonCap =
+      count > 0 && vehicle.capacity > 0
+        ? Math.max(1, Math.round(vehicle.capacity / count))
+        : spec.capacityPerWagon || RAIL_WAGON_CATALOG[vehicle.cargoType].capacity;
+
+    let remainingCargo = Math.max(0, vehicle.cargoAmount ?? 0);
+    const built: TrainWagon[] = [];
+    for (let i = 0; i < count; i++) {
+      const loaded = Math.min(perWagonCap, remainingCargo);
+      remainingCargo -= loaded;
+      built.push({
+        id: `${vehicle.id}-w-${i + 1}`,
+        cargoType: vehicle.cargoType,
+        capacity: perWagonCap,
+        cargoAmount: loaded,
+        cargoOriginStationId: loaded > 0 ? vehicle.cargoOriginStationId : null,
+        cargoLoadedDay: vehicle.cargoLoadedDay ?? this.state.date.totalDays,
+        purchaseValue:
+          spec.wagonPrice > 0
+            ? spec.wagonPrice
+            : RAIL_WAGON_CATALOG[vehicle.cargoType].price,
+        annualRunningCost:
+          spec.runningCostPerWagon > 0
+            ? spec.runningCostPerWagon
+            : RAIL_WAGON_CATALOG[vehicle.cargoType].annualRunningCost,
+      });
+    }
+    vehicle.wagons = built;
+    vehicle.wt = built.map((w) => w.cargoType);
+    return built;
+  }
+
+  private recomputeTrainConsistStats(vehicle: Vehicle): void {
+    if (vehicle.network !== 'RAIL') return;
+    const wagons = this.ensureTrainWagons(vehicle);
+    const locoSpec = VEHICLE_CATALOG[vehicle.modelId] ?? VEHICLE_CATALOG.LOCO_STEAM;
+
+    vehicle.wagonCount = wagons.length;
+    vehicle.capacity = wagons.reduce((sum, w) => sum + w.capacity, 0);
+    vehicle.cargoAmount = wagons.reduce((sum, w) => sum + w.cargoAmount, 0);
+
+    if (vehicle.cargoAmount === 0) {
+      vehicle.cargoOriginStationId = null;
+    } else {
+      const firstLoaded = wagons.find(
+        (w) => w.cargoAmount > 0 && Boolean(w.cargoOriginStationId)
+      );
+      if (firstLoaded) {
+        vehicle.cargoOriginStationId = firstLoaded.cargoOriginStationId;
+        vehicle.cargoLoadedDay = firstLoaded.cargoLoadedDay;
+      }
+    }
+
+    const wagonsPurchase = wagons.reduce((sum, w) => sum + w.purchaseValue, 0);
+    vehicle.purchaseValue = locoSpec.price + wagonsPurchase;
+
+    const annualRun =
+      locoSpec.annualRunningCost +
+      wagons.reduce((sum, w) => sum + w.annualRunningCost, 0);
+    vehicle.baseAnnualRunningCost = annualRun;
+    vehicle.runningCostPerMonth = Math.round(annualRun / 12);
+    vehicle.wt = wagons.map((w) => w.cargoType);
+
+    const baseName = vehicle.name.split(' (')[0];
+    if (wagons.length === 0) {
+      vehicle.name = `${baseName} (Uten vogner)`;
+    } else {
+      const counts = new Map<CargoType, number>();
+      const distinctInOrder: CargoType[] = [];
+      for (const w of wagons) {
+        if (!counts.has(w.cargoType)) {
+          distinctInOrder.push(w.cargoType);
+        }
+        counts.set(w.cargoType, (counts.get(w.cargoType) ?? 0) + 1);
+      }
+      let dominant = wagons[0].cargoType;
+      let bestCount = -1;
+      for (const ct of distinctInOrder) {
+        const c = counts.get(ct) ?? 0;
+        if (c > bestCount) {
+          bestCount = c;
+          dominant = ct;
+        }
+      }
+      vehicle.cargoType = dominant;
+      const cargoSummary = distinctInOrder
+        .map((c) => CARGO_LABELS_NO[c])
+        .join(' + ');
+      vehicle.name = `${baseName} (${cargoSummary})`;
+    }
+  }
+
+  private parkVehicleInDepot(
+    vehicle: Vehicle,
+    depotX: number,
+    depotY: number
+  ): void {
+    vehicle.x = depotX;
+    vehicle.y = depotY;
+    vehicle.nextX = depotX;
+    vehicle.nextY = depotY;
+    vehicle.depotX = depotX;
+    vehicle.depotY = depotY;
+    vehicle.progress = 0;
+    vehicle.speedKmh = 0;
+    vehicle.accelTicks = 0;
+    vehicle.loadingTicksRemaining = 0;
+    vehicle.fullLoadWaitTicks = 0;
+    vehicle.goingToDepot = null;
+    vehicle.state = 'IN_DEPOT';
+    vehicle.path = [];
+    vehicle.trail = [{ x: depotX, y: depotY }];
+  }
+
   private stepVehicleSubTick(vehicle: Vehicle): void {
-    if (
-      vehicle.state === 'STOPPED' ||
-      vehicle.state === 'IN_DEPOT' ||
-      vehicle.orders.length === 0
-    ) {
+    if (vehicle.state === 'STOPPED' || vehicle.state === 'IN_DEPOT') {
       vehicle.speedKmh = 0;
       return;
     }
 
-    if (vehicle.currentOrderIndex >= vehicle.orders.length || vehicle.currentOrderIndex < 0) {
-      vehicle.currentOrderIndex = 0;
+    let goalTiles: GridPoint[] = [];
+    let targetStation: Station | undefined;
+
+    if (vehicle.goingToDepot) {
+      const gd = vehicle.goingToDepot;
+      const depTile = inBounds(gd.x, gd.y, this.state.mapSize)
+        ? this.state.tiles[tileIndex(gd.x, gd.y, this.state.mapSize)]
+        : null;
+      if (!depTile || depTile.depot !== vehicle.network) {
+        // Target depot was demolished while en route — fall back to normal orders
+        vehicle.goingToDepot = null;
+      } else if (vehicle.x === gd.x && vehicle.y === gd.y) {
+        this.parkVehicleInDepot(vehicle, gd.x, gd.y);
+        return;
+      } else {
+        goalTiles = [{ x: gd.x, y: gd.y }];
+      }
     }
 
-    const targetStationId = vehicle.orders[vehicle.currentOrderIndex];
-    const targetStation = this.state.stations.find((s) => s.id === targetStationId);
+    if (!vehicle.goingToDepot) {
+      if (vehicle.orders.length === 0) {
+        vehicle.speedKmh = 0;
+        return;
+      }
+      if (
+        vehicle.currentOrderIndex >= vehicle.orders.length ||
+        vehicle.currentOrderIndex < 0
+      ) {
+        vehicle.currentOrderIndex = 0;
+      }
 
-    if (!targetStation) {
-      vehicle.orders = vehicle.orders.filter((id) => id !== targetStationId);
-      vehicle.currentOrderIndex = 0;
-      vehicle.speedKmh = 0;
-      return;
+      const targetStationId = vehicle.orders[vehicle.currentOrderIndex];
+      targetStation = this.state.stations.find((s) => s.id === targetStationId);
+
+      if (!targetStation) {
+        vehicle.orders = vehicle.orders.filter((id) => id !== targetStationId);
+        vehicle.currentOrderIndex = 0;
+        vehicle.speedKmh = 0;
+        return;
+      }
+
+      const atTargetStation = targetStation.tiles.some(
+        (t) => t.x === vehicle.x && t.y === vehicle.y
+      );
+
+      if (atTargetStation) {
+        this.handleVehicleAtStation(vehicle, targetStation);
+        return;
+      }
+
+      goalTiles = targetStation.tiles;
     }
 
-    const atTargetStation = targetStation.tiles.some(
-      (t) => t.x === vehicle.x && t.y === vehicle.y
-    );
-
-    if (atTargetStation) {
-      this.handleVehicleAtStation(vehicle, targetStation);
-      return;
-    }
-
-    // Ensure valid path to targetStation (and verify next step wasn't bulldozed)
+    // Ensure valid path to goalTiles (and verify next step wasn't bulldozed)
     const firstPathPt = vehicle.path[0];
     const lastPathPt = vehicle.path[vehicle.path.length - 1];
     const firstStepTile =
@@ -479,7 +645,7 @@ export class GameEngine {
     const firstStepTraversable = Boolean(
       firstStepTile &&
         (isTileTraversableForNetwork(firstStepTile, vehicle.network) ||
-          targetStation.tiles.some(
+          goalTiles.some(
             (t) => t.x === firstPathPt.x && t.y === firstPathPt.y
           ))
     );
@@ -487,7 +653,7 @@ export class GameEngine {
       vehicle.path.length > 0 &&
       firstStepTraversable &&
       Boolean(lastPathPt) &&
-      targetStation.tiles.some(
+      goalTiles.some(
         (t) => t.x === lastPathPt.x && t.y === lastPathPt.y
       );
 
@@ -501,7 +667,7 @@ export class GameEngine {
         this.state.mapSize,
         vehicle.x,
         vehicle.y,
-        targetStation.tiles,
+        goalTiles,
         vehicle.network,
         avoidSet
       );
@@ -512,7 +678,7 @@ export class GameEngine {
           this.state.mapSize,
           vehicle.x,
           vehicle.y,
-          targetStation.tiles,
+          goalTiles,
           vehicle.network
         );
       }
@@ -546,7 +712,7 @@ export class GameEngine {
           this.state.mapSize,
           vehicle.x,
           vehicle.y,
-          targetStation.tiles,
+          goalTiles,
           'RAIL',
           occupied
         );
@@ -645,6 +811,15 @@ export class GameEngine {
       vehicle.path.shift();
       vehicle.progress = 0;
 
+      if (
+        vehicle.goingToDepot &&
+        vehicle.x === vehicle.goingToDepot.x &&
+        vehicle.y === vehicle.goingToDepot.y
+      ) {
+        this.parkVehicleInDepot(vehicle, vehicle.x, vehicle.y);
+        return;
+      }
+
       if (vehicle.path.length > 0) {
         vehicle.nextX = vehicle.path[0].x;
         vehicle.nextY = vehicle.path[0].y;
@@ -653,6 +828,103 @@ export class GameEngine {
         vehicle.nextY = vehicle.y;
       }
     }
+  }
+
+  private deliverCargoBatchAtStation(
+    station: Station,
+    cargoType: CargoType,
+    amount: number,
+    originStationId: string,
+    loadedDay: number
+  ): number {
+    if (amount <= 0 || originStationId === station.id) return 0;
+    const acceptance = doesStationAcceptCargo(this.state, station, cargoType);
+    if (!acceptance.accepts) return 0;
+
+    const originStation = this.state.stations.find(
+      (s) => s.id === originStationId
+    );
+    const manhattanDist = originStation
+      ? Math.max(
+          1,
+          Math.abs(station.x - originStation.x) +
+            Math.abs(station.y - originStation.y)
+        )
+      : 12;
+    const transitDays = Math.max(0, this.state.date.totalDays - loadedDay);
+
+    const payout = calculateCargoPayment(
+      cargoType,
+      amount,
+      manhattanDist,
+      transitDays
+    );
+
+    // Secondary Industry Production (WOOD -> GOODS, GRAIN -> FOOD)
+    if (acceptance.targetIndustryId) {
+      const targetInd = this.state.industries.find(
+        (i) => i.id === acceptance.targetIndustryId
+      );
+      if (targetInd) {
+        const conv = calculateSecondaryIndustryOutput(cargoType, amount);
+        if (conv.outputCargo && conv.producedUnits > 0) {
+          targetInd.storedOutput += conv.producedUnits;
+          const outCargo = conv.outputCargo;
+          const servingStations = this.state.stations.filter(
+            (s) =>
+              s.nearbyIndustryIds.includes(targetInd.id) &&
+              s.kind !== 'BUS_STOP'
+          );
+          if (servingStations.length > 0) {
+            const immediateToPlatform = Math.floor(conv.producedUnits * 0.5);
+            targetInd.storedOutput -= immediateToPlatform;
+            servingStations[0].waitingCargo[outCargo] =
+              (servingStations[0].waitingCargo[outCargo] ?? 0) +
+              immediateToPlatform;
+          }
+        }
+      }
+    }
+
+    // Town Delivery Tracking & Responsive Town Growth
+    const townId = acceptance.targetTownId ?? station.townId;
+    if (townId) {
+      const town = this.state.towns.find((t) => t.id === townId);
+      if (town) {
+        if (cargoType === 'PASSENGERS') {
+          town.deliveredPassengersThisMonth =
+            (town.deliveredPassengersThisMonth ?? 0) + amount;
+          town.growthCounter += amount * 0.04;
+        } else if (cargoType === 'MAIL') {
+          town.deliveredMailThisMonth =
+            (town.deliveredMailThisMonth ?? 0) + amount;
+          town.growthCounter += amount * 0.05;
+        } else if (cargoType === 'GOODS' || cargoType === 'FOOD') {
+          town.deliveredGoodsOrFoodThisMonth =
+            (town.deliveredGoodsOrFoodThisMonth ?? 0) + amount;
+          town.growthCounter += amount * 0.07;
+        }
+
+        const immediatePop = Math.floor(town.growthCounter);
+        if (immediatePop > 0) {
+          town.population += immediatePop;
+          town.growthCounter -= immediatePop;
+          town.monthlyPassengers = Math.max(
+            14,
+            Math.round(town.population * 0.06)
+          );
+          town.monthlyMail = Math.max(6, Math.round(town.population * 0.025));
+          if (
+            expandTownBuildings(this.state.tiles, this.state.mapSize, town)
+          ) {
+            this.state.networkRevision =
+              (this.state.networkRevision ?? 0) + 1;
+          }
+        }
+      }
+    }
+
+    return payout;
   }
 
   private handleVehicleAtStation(vehicle: Vehicle, station: Station): void {
@@ -681,6 +953,9 @@ export class GameEngine {
       return;
     }
 
+    const isRail = vehicle.network === 'RAIL';
+    const wagons = isRail ? this.ensureTrainWagons(vehicle) : [];
+
     if (vehicle.state !== 'LOADING') {
       vehicle.state = 'LOADING';
       vehicle.speedKmh = 0;
@@ -691,154 +966,164 @@ export class GameEngine {
       vehicle.nextY = vehicle.y;
       vehicle.loadingTicksRemaining = 5;
 
-      // 1. Unload & Deliver if carrying accepted cargo from a DIFFERENT station
-      if (
+      // 1. Unload & Deliver accepted cargo from a DIFFERENT station (per wagon on RAIL, single hold on ROAD)
+      let totalStationPayout = 0;
+
+      if (isRail) {
+        // Group unloading wagons by (cargoType, originStationId, loadedDay) so uniform consists match exact rounded kr payout
+        const batches = new Map<
+          string,
+          {
+            cargoType: CargoType;
+            originStationId: string;
+            loadedDay: number;
+            amount: number;
+            wagons: TrainWagon[];
+          }
+        >();
+
+        for (const w of wagons) {
+          if (
+            w.cargoAmount > 0 &&
+            w.cargoOriginStationId &&
+            w.cargoOriginStationId !== station.id &&
+            doesStationAcceptCargo(this.state, station, w.cargoType).accepts
+          ) {
+            const key = `${w.cargoType}|${w.cargoOriginStationId}|${w.cargoLoadedDay}`;
+            let batch = batches.get(key);
+            if (!batch) {
+              batch = {
+                cargoType: w.cargoType,
+                originStationId: w.cargoOriginStationId,
+                loadedDay: w.cargoLoadedDay,
+                amount: 0,
+                wagons: [],
+              };
+              batches.set(key, batch);
+            }
+            batch.amount += w.cargoAmount;
+            batch.wagons.push(w);
+          }
+        }
+
+        for (const batch of batches.values()) {
+          const payout = this.deliverCargoBatchAtStation(
+            station,
+            batch.cargoType,
+            batch.amount,
+            batch.originStationId,
+            batch.loadedDay
+          );
+          totalStationPayout += payout;
+          for (const w of batch.wagons) {
+            w.cargoAmount = 0;
+            w.cargoOriginStationId = null;
+          }
+        }
+
+        vehicle.cargoAmount = wagons.reduce((sum, w) => sum + w.cargoAmount, 0);
+        if (vehicle.cargoAmount === 0) {
+          vehicle.cargoOriginStationId = null;
+        } else {
+          const rem = wagons.find(
+            (w) => w.cargoAmount > 0 && Boolean(w.cargoOriginStationId)
+          );
+          if (rem) {
+            vehicle.cargoOriginStationId = rem.cargoOriginStationId;
+            vehicle.cargoLoadedDay = rem.cargoLoadedDay;
+          }
+        }
+      } else if (
         vehicle.cargoAmount > 0 &&
         vehicle.cargoOriginStationId &&
-        vehicle.cargoOriginStationId !== station.id
+        vehicle.cargoOriginStationId !== station.id &&
+        doesStationAcceptCargo(this.state, station, vehicle.cargoType).accepts
       ) {
-        const acceptance = doesStationAcceptCargo(
-          this.state,
+        totalStationPayout = this.deliverCargoBatchAtStation(
           station,
-          vehicle.cargoType
+          vehicle.cargoType,
+          vehicle.cargoAmount,
+          vehicle.cargoOriginStationId,
+          vehicle.cargoLoadedDay
         );
-        if (acceptance.accepts) {
-          const originStation = this.state.stations.find(
-            (s) => s.id === vehicle.cargoOriginStationId
+        vehicle.cargoAmount = 0;
+        vehicle.cargoOriginStationId = null;
+      }
+
+      if (totalStationPayout > 0) {
+        vehicle.profitThisYear += totalStationPayout;
+        if (vehicle.ownerId === 'player') {
+          this.state.corporate.cash += totalStationPayout;
+          this.state.corporate.currentYearPnL.freightRevenue +=
+            totalStationPayout;
+          this.pushFloatingPopup(
+            station.x,
+            station.y,
+            `+kr ${formatNorwegianNumber(totalStationPayout)}`,
+            'green'
           );
-          const manhattanDist = originStation
-            ? Math.max(
-                1,
-                Math.abs(station.x - originStation.x) +
-                  Math.abs(station.y - originStation.y)
-              )
-            : 12;
-          const transitDays = Math.max(
-            0,
-            this.state.date.totalDays - vehicle.cargoLoadedDay
+          recomputeValuationsAndWarnings(this.state);
+        } else {
+          const ai = this.state.aiCompanies.find(
+            (a) => a.id === vehicle.ownerId
           );
-
-          const payout = calculateCargoPayment(
-            vehicle.cargoType,
-            vehicle.cargoAmount,
-            manhattanDist,
-            transitDays
-          );
-
-          if (payout > 0) {
-            vehicle.profitThisYear += payout;
-            if (vehicle.ownerId === 'player') {
-              this.state.corporate.cash += payout;
-              this.state.corporate.currentYearPnL.freightRevenue += payout;
-              this.pushFloatingPopup(
-                station.x,
-                station.y,
-                `+kr ${formatNorwegianNumber(payout)}`,
-                'green'
-              );
-              recomputeValuationsAndWarnings(this.state);
-            } else {
-              const ai = this.state.aiCompanies.find(
-                (a) => a.id === vehicle.ownerId
-              );
-              if (ai) {
-                ai.cash += payout;
-              }
-            }
+          if (ai) {
+            ai.cash += totalStationPayout;
           }
-
-          // Secondary Industry Production (WOOD -> GOODS, GRAIN -> FOOD)
-          if (acceptance.targetIndustryId) {
-            const targetInd = this.state.industries.find(
-              (i) => i.id === acceptance.targetIndustryId
-            );
-            if (targetInd) {
-              const conv = calculateSecondaryIndustryOutput(
-                vehicle.cargoType,
-                vehicle.cargoAmount
-              );
-              if (conv.outputCargo && conv.producedUnits > 0) {
-                targetInd.storedOutput += conv.producedUnits;
-                const outCargo = conv.outputCargo;
-                const servingStations = this.state.stations.filter(
-                  (s) =>
-                    s.nearbyIndustryIds.includes(targetInd.id) &&
-                    s.kind !== 'BUS_STOP'
-                );
-                if (servingStations.length > 0) {
-                  const immediateToPlatform = Math.floor(conv.producedUnits * 0.5);
-                  targetInd.storedOutput -= immediateToPlatform;
-                  servingStations[0].waitingCargo[outCargo] =
-                    (servingStations[0].waitingCargo[outCargo] ?? 0) +
-                    immediateToPlatform;
-                }
-              }
-            }
-          }
-
-          // Town Delivery Tracking & Responsive Town Growth
-          const townId = acceptance.targetTownId ?? station.townId;
-          if (townId) {
-            const town = this.state.towns.find((t) => t.id === townId);
-            if (town) {
-              if (vehicle.cargoType === 'PASSENGERS') {
-                town.deliveredPassengersThisMonth =
-                  (town.deliveredPassengersThisMonth ?? 0) + vehicle.cargoAmount;
-                town.growthCounter += vehicle.cargoAmount * 0.04;
-              } else if (vehicle.cargoType === 'MAIL') {
-                town.deliveredMailThisMonth =
-                  (town.deliveredMailThisMonth ?? 0) + vehicle.cargoAmount;
-                town.growthCounter += vehicle.cargoAmount * 0.05;
-              } else if (
-                vehicle.cargoType === 'GOODS' ||
-                vehicle.cargoType === 'FOOD'
-              ) {
-                town.deliveredGoodsOrFoodThisMonth =
-                  (town.deliveredGoodsOrFoodThisMonth ?? 0) + vehicle.cargoAmount;
-                town.growthCounter += vehicle.cargoAmount * 0.07;
-              }
-
-              const immediatePop = Math.floor(town.growthCounter);
-              if (immediatePop > 0) {
-                town.population += immediatePop;
-                town.growthCounter -= immediatePop;
-                town.monthlyPassengers = Math.max(
-                  14,
-                  Math.round(town.population * 0.06)
-                );
-                town.monthlyMail = Math.max(6, Math.round(town.population * 0.025));
-                if (
-                  expandTownBuildings(this.state.tiles, this.state.mapSize, town)
-                ) {
-                  this.state.networkRevision =
-                    (this.state.networkRevision ?? 0) + 1;
-                }
-              }
-            }
-          }
-
-          vehicle.cargoAmount = 0;
-          vehicle.cargoOriginStationId = null;
         }
       }
     }
 
-    // 2. Gradual Loading of Waiting Cargo (`6..10` units per subtick, min 5 subticks dwell)
+    // 2. Gradual Loading of Waiting Cargo (`7..10` units per subtick, min 5 subticks dwell)
     station.daysSincePickup = 0;
     station.lastVehicleMaxSpeedKmh = vehicle.maxSpeedKmh;
 
-    const available = station.waitingCargo[vehicle.cargoType] ?? 0;
-    const freeSpace = vehicle.capacity - vehicle.cargoAmount;
-    const loadRatePerSubtick = vehicle.network === 'RAIL' ? 10 : 7;
+    if (isRail) {
+      const perCargoBudget = new Map<CargoType, number>();
+      for (const w of wagons) {
+        const available = station.waitingCargo[w.cargoType] ?? 0;
+        const freeSpace = w.capacity - w.cargoAmount;
+        if (available <= 0 || freeSpace <= 0) continue;
 
-    if (available > 0 && freeSpace > 0) {
-      const toLoad = Math.min(available, freeSpace, loadRatePerSubtick);
-      station.waitingCargo[vehicle.cargoType] -= toLoad;
-      if (vehicle.cargoAmount === 0) {
-        vehicle.cargoOriginStationId = station.id;
-        vehicle.cargoLoadedDay = this.state.date.totalDays;
+        const remainingBudget = perCargoBudget.get(w.cargoType) ?? 10;
+        if (remainingBudget <= 0) continue;
+
+        const toLoad = Math.min(available, freeSpace, remainingBudget);
+        if (toLoad > 0) {
+          station.waitingCargo[w.cargoType] -= toLoad;
+          if (w.cargoAmount === 0) {
+            w.cargoOriginStationId = station.id;
+            w.cargoLoadedDay = this.state.date.totalDays;
+          }
+          w.cargoAmount += toLoad;
+          perCargoBudget.set(w.cargoType, remainingBudget - toLoad);
+        }
       }
-      vehicle.cargoAmount += toLoad;
+
+      vehicle.cargoAmount = wagons.reduce((sum, w) => sum + w.cargoAmount, 0);
+      const firstLoaded = wagons.find(
+        (w) => w.cargoAmount > 0 && Boolean(w.cargoOriginStationId)
+      );
+      if (firstLoaded) {
+        vehicle.cargoOriginStationId = firstLoaded.cargoOriginStationId;
+        vehicle.cargoLoadedDay = firstLoaded.cargoLoadedDay;
+      } else {
+        vehicle.cargoOriginStationId = null;
+      }
+    } else {
+      const available = station.waitingCargo[vehicle.cargoType] ?? 0;
+      const freeSpace = vehicle.capacity - vehicle.cargoAmount;
+      const loadRatePerSubtick = 7;
+
+      if (available > 0 && freeSpace > 0) {
+        const toLoad = Math.min(available, freeSpace, loadRatePerSubtick);
+        station.waitingCargo[vehicle.cargoType] -= toLoad;
+        if (vehicle.cargoAmount === 0) {
+          vehicle.cargoOriginStationId = station.id;
+          vehicle.cargoLoadedDay = this.state.date.totalDays;
+        }
+        vehicle.cargoAmount += toLoad;
+      }
     }
 
     vehicle.loadingTicksRemaining = Math.max(
@@ -847,15 +1132,30 @@ export class GameEngine {
     );
     vehicle.fullLoadWaitTicks = (vehicle.fullLoadWaitTicks ?? 0) + 1;
 
-    const remainingAtPlatform = station.waitingCargo[vehicle.cargoType] ?? 0;
-    const activelyBoardingAvailable =
-      remainingAtPlatform > 0 && vehicle.cargoAmount < vehicle.capacity;
+    const activelyBoardingAvailable = isRail
+      ? wagons.some(
+          (w) =>
+            (station.waitingCargo[w.cargoType] ?? 0) > 0 &&
+            w.cargoAmount < w.capacity
+        )
+      : (station.waitingCargo[vehicle.cargoType] ?? 0) > 0 &&
+        vehicle.cargoAmount < vehicle.capacity;
 
     const waitingForFullLoad =
       Boolean(vehicle.waitForFullLoad) &&
-      vehicle.cargoAmount < vehicle.capacity &&
-      doesStationCatchmentProduceCargo(this.state, station, vehicle.cargoType) &&
-      (vehicle.fullLoadWaitTicks ?? 0) < FULL_LOAD_MAX_WAIT_SUBTICKS;
+      (vehicle.fullLoadWaitTicks ?? 0) < FULL_LOAD_MAX_WAIT_SUBTICKS &&
+      (isRail
+        ? wagons.some(
+            (w) =>
+              w.cargoAmount < w.capacity &&
+              doesStationCatchmentProduceCargo(this.state, station, w.cargoType)
+          )
+        : vehicle.cargoAmount < vehicle.capacity &&
+          doesStationCatchmentProduceCargo(
+            this.state,
+            station,
+            vehicle.cargoType
+          ));
 
     if (
       (vehicle.loadingTicksRemaining ?? 0) <= 0 &&
@@ -1200,6 +1500,21 @@ export class GameEngine {
       }
       if ((tile.buildingTier ?? 0) > 0) {
         return { ok: false, message: 'Bykommunen nekter riving av bygårder.' };
+      }
+      if (tile.depot) {
+        const hasVehInDepot = this.state.vehicles.some(
+          (v) => v.state === 'IN_DEPOT' && v.x === rx && v.y === ry
+        );
+        const hasStoredWagons = (this.state.depotWagons ?? []).some(
+          (w) => w.depotX === rx && w.depotY === ry
+        );
+        if (hasVehInDepot || hasStoredWagons) {
+          return {
+            ok: false,
+            message:
+              'Tøm eller selg kjøretøy og vogner i depoet før du river det!',
+          };
+        }
       }
 
       const wasBridge = Boolean(tile.bridge);
@@ -1862,8 +2177,13 @@ export class GameEngine {
       };
     }
 
+    const roundedWagons = Math.round(wagonCount);
     const clampedWagons =
-      spec.network === 'RAIL' ? Math.max(1, Math.min(6, Math.round(wagonCount))) : 0;
+      spec.network === 'RAIL'
+        ? roundedWagons <= 0
+          ? 0
+          : Math.max(1, Math.min(6, roundedWagons))
+        : 0;
     const selectedCargo =
       cargoType && spec.supportedCargos.includes(cargoType)
         ? cargoType
@@ -1902,11 +2222,36 @@ export class GameEngine {
       this.localIdentity && this.localIdentity.clientId !== 'player'
         ? `${this.localIdentity.clientId}-`
         : '';
+    const vehId = `veh-${vehPrefix}${this.state.vehicles.length + 1}-${Math.random()
+      .toString(36)
+      .slice(2, 5)}`;
+
+    const builtWagons: TrainWagon[] | undefined =
+      spec.network === 'RAIL'
+        ? Array.from({ length: clampedWagons }, (_, idx) => ({
+            id: `${vehId}-w-${idx + 1}`,
+            cargoType: selectedCargo,
+            capacity: spec.capacityPerWagon,
+            cargoAmount: 0,
+            cargoOriginStationId: null,
+            cargoLoadedDay: this.state.date.totalDays,
+            purchaseValue: spec.wagonPrice,
+            annualRunningCost: spec.runningCostPerWagon,
+          }))
+        : undefined;
+
+    const cargoLabel =
+      spec.network === 'RAIL' && clampedWagons === 0
+        ? 'Uten vogner'
+        : CARGO_LABELS_NO[selectedCargo];
+
+    const canDispatchImmediately =
+      validOrders.length > 0 &&
+      !(spec.network === 'RAIL' && clampedWagons === 0);
+
     const vehicle: Vehicle = {
-      id: `veh-${vehPrefix}${this.state.vehicles.length + 1}-${Math.random()
-        .toString(36)
-        .slice(2, 5)}`,
-      name: `${labelPrefix} #${playerFleetCount} (${CARGO_LABELS_NO[selectedCargo]})`,
+      id: vehId,
+      name: `${labelPrefix} #${playerFleetCount} (${cargoLabel})`,
       ownerId: 'player',
       network: spec.network,
       modelId,
@@ -1923,15 +2268,19 @@ export class GameEngine {
       direction: 0,
       speedKmh: 0,
       maxSpeedKmh: spec.maxSpeedKmh,
-      state: validOrders.length > 0 ? 'MOVING' : 'IN_DEPOT',
+      state: canDispatchImmediately ? 'MOVING' : 'IN_DEPOT',
       orders: validOrders,
       currentOrderIndex: 0,
       path: [],
       profitThisYear: 0,
       runningCostPerMonth: Math.round(annualRunCost / 12),
+      baseAnnualRunningCost: annualRunCost,
       purchaseValue: totalCost,
       ageMonths: 0,
       wagonCount: clampedWagons,
+      wagons: builtWagons,
+      wt: builtWagons ? builtWagons.map((w) => w.cargoType) : undefined,
+      goingToDepot: null,
       trail: [{ x: depotTile.x, y: depotTile.y }],
       depotX: depotTile.x,
       depotY: depotTile.y,
@@ -1959,6 +2308,909 @@ export class GameEngine {
     };
   }
 
+  private resolvePlayerDepotTile(
+    depotX: number | undefined,
+    depotY: number | undefined,
+    network: 'ROAD' | 'RAIL'
+  ): Tile | undefined {
+    if (
+      depotX !== undefined &&
+      depotY !== undefined &&
+      inBounds(depotX, depotY, this.state.mapSize)
+    ) {
+      const t = this.state.tiles[tileIndex(depotX, depotY, this.state.mapSize)];
+      if (t.depot === network && (!t.ownerId || t.ownerId === 'player')) {
+        return t;
+      }
+    }
+    return this.state.tiles.find(
+      (t) => t.depot === network && (!t.ownerId || t.ownerId === 'player')
+    );
+  }
+
+  /**
+   * OpenTTD Separate Locomotive Purchase (`0` wagons, parked `IN_DEPOT` at `(depotX, depotY)`).
+   */
+  public buyLocomotive(
+    depotX: number,
+    depotY: number,
+    modelId: 'LOCO_STEAM' | 'LOCO_DIESEL' | 'LOCO_ELECTRIC'
+  ): ActionResult {
+    const spec = VEHICLE_CATALOG[modelId];
+    if (!spec || spec.network !== 'RAIL') {
+      return { ok: false, message: 'Ugyldig lokomotivmodell.' };
+    }
+
+    const depotTile = this.resolvePlayerDepotTile(depotX, depotY, 'RAIL');
+    if (!depotTile) {
+      return {
+        ok: false,
+        message: 'Bygg et togdepot før du kjøper lokomotiv!',
+      };
+    }
+
+    const price = spec.price;
+    if (this.state.corporate.cash < price) {
+      return {
+        ok: false,
+        message: `Ikke nok selskapskontanter (${formatKr(price)} kreves).`,
+      };
+    }
+
+    this.state.corporate.cash -= price;
+    this.state.corporate.currentYearPnL.vehiclePurchaseCost += price;
+
+    const playerTrainCount =
+      this.state.vehicles.filter(
+        (v) => v.ownerId === 'player' && v.network === 'RAIL'
+      ).length + 1;
+
+    const vehPrefix =
+      this.localIdentity && this.localIdentity.clientId !== 'player'
+        ? `${this.localIdentity.clientId}-`
+        : '';
+    const vehId = `veh-${vehPrefix}${this.state.vehicles.length + 1}-${Math.random()
+      .toString(36)
+      .slice(2, 5)}`;
+
+    const vehicle: Vehicle = {
+      id: vehId,
+      name: `Tog #${playerTrainCount} (Uten vogner)`,
+      ownerId: 'player',
+      network: 'RAIL',
+      modelId,
+      cargoType: spec.defaultCargo,
+      capacity: 0,
+      cargoAmount: 0,
+      cargoOriginStationId: null,
+      cargoLoadedDay: this.state.date.totalDays,
+      x: depotTile.x,
+      y: depotTile.y,
+      nextX: depotTile.x,
+      nextY: depotTile.y,
+      progress: 0,
+      direction: 0,
+      speedKmh: 0,
+      maxSpeedKmh: spec.maxSpeedKmh,
+      state: 'IN_DEPOT',
+      orders: [],
+      currentOrderIndex: 0,
+      path: [],
+      profitThisYear: 0,
+      runningCostPerMonth: Math.round(spec.annualRunningCost / 12),
+      baseAnnualRunningCost: spec.annualRunningCost,
+      purchaseValue: price,
+      ageMonths: 0,
+      wagonCount: 0,
+      wagons: [],
+      wt: [],
+      goingToDepot: null,
+      trail: [{ x: depotTile.x, y: depotTile.y }],
+      depotX: depotTile.x,
+      depotY: depotTile.y,
+      loadingTicksRemaining: 0,
+      waitForFullLoad: false,
+      accelTicks: 0,
+      fullLoadWaitTicks: 0,
+    };
+
+    this.state.vehicles.push(vehicle);
+    this.pushFloatingPopup(
+      depotTile.x,
+      depotTile.y,
+      `-kr ${formatNorwegianNumber(price)}`,
+      'red'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: price,
+      vehicleId: vehicle.id,
+      message: `Kjøpte ${spec.nameNo} uten vogner (${formatKr(price)}). Velg og koble på vogner i depoet!`,
+    };
+  }
+
+  /**
+   * OpenTTD Specialized Road Vehicle Shop (`ROAD_VEHICLE_SHOP_LIST`, parked `IN_DEPOT` at `(depotX, depotY)`).
+   */
+  public buyRoadVehicle(
+    depotX: number,
+    depotY: number,
+    shopIdOrCargo: string
+  ): ActionResult {
+    const key = (shopIdOrCargo || '').trim().toUpperCase();
+    const shopSpec = ROAD_VEHICLE_SHOP_LIST.find(
+      (item) =>
+        item.shopId.toUpperCase() === key ||
+        item.cargoType.toUpperCase() === key ||
+        (key === 'BUS_CITY' && item.modelId === 'BUS_CITY')
+    );
+    if (!shopSpec) {
+      return { ok: false, message: 'Ukjent veikjøretøy i katalogen.' };
+    }
+
+    const depotTile = this.resolvePlayerDepotTile(depotX, depotY, 'ROAD');
+    if (!depotTile) {
+      return {
+        ok: false,
+        message: 'Bygg et veidepot før du kjøper buss eller lastebil!',
+      };
+    }
+
+    const price = shopSpec.price;
+    if (this.state.corporate.cash < price) {
+      return {
+        ok: false,
+        message: `Ikke nok selskapskontanter (${formatKr(price)} kreves).`,
+      };
+    }
+
+    this.state.corporate.cash -= price;
+    this.state.corporate.currentYearPnL.vehiclePurchaseCost += price;
+
+    const playerRoadCount =
+      this.state.vehicles.filter(
+        (v) => v.ownerId === 'player' && v.network === 'ROAD'
+      ).length + 1;
+    const labelPrefix = shopSpec.modelId === 'BUS_CITY' ? 'Buss' : 'Lastebil';
+
+    const vehPrefix =
+      this.localIdentity && this.localIdentity.clientId !== 'player'
+        ? `${this.localIdentity.clientId}-`
+        : '';
+    const vehId = `veh-${vehPrefix}${this.state.vehicles.length + 1}-${Math.random()
+      .toString(36)
+      .slice(2, 5)}`;
+
+    const vehicle: Vehicle = {
+      id: vehId,
+      name: `${labelPrefix} #${playerRoadCount} (${CARGO_LABELS_NO[shopSpec.cargoType]})`,
+      ownerId: 'player',
+      network: 'ROAD',
+      modelId: shopSpec.modelId,
+      cargoType: shopSpec.cargoType,
+      capacity: shopSpec.capacity,
+      cargoAmount: 0,
+      cargoOriginStationId: null,
+      cargoLoadedDay: this.state.date.totalDays,
+      x: depotTile.x,
+      y: depotTile.y,
+      nextX: depotTile.x,
+      nextY: depotTile.y,
+      progress: 0,
+      direction: 0,
+      speedKmh: 0,
+      maxSpeedKmh: shopSpec.maxSpeedKmh,
+      state: 'IN_DEPOT',
+      orders: [],
+      currentOrderIndex: 0,
+      path: [],
+      profitThisYear: 0,
+      runningCostPerMonth: Math.round(shopSpec.annualRunningCost / 12),
+      baseAnnualRunningCost: shopSpec.annualRunningCost,
+      purchaseValue: price,
+      ageMonths: 0,
+      wagonCount: 0,
+      goingToDepot: null,
+      trail: [{ x: depotTile.x, y: depotTile.y }],
+      depotX: depotTile.x,
+      depotY: depotTile.y,
+      loadingTicksRemaining: 0,
+      waitForFullLoad: false,
+      accelTicks: 0,
+      fullLoadWaitTicks: 0,
+    };
+
+    this.state.vehicles.push(vehicle);
+    this.pushFloatingPopup(
+      depotTile.x,
+      depotTile.y,
+      `-kr ${formatNorwegianNumber(price)}`,
+      'red'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: price,
+      vehicleId: vehicle.id,
+      message: `Kjøpte ${shopSpec.nameNo} for ${formatKr(price)}.`,
+    };
+  }
+
+  /**
+   * OpenTTD Separate Rail Wagon Purchase — either coupled directly onto a train `IN_DEPOT`
+   * at `(depotX, depotY)` or placed onto the depot's spare siding (`state.depotWagons`).
+   */
+  public buyRailWagon(
+    depotX: number,
+    depotY: number,
+    cargoType: CargoType,
+    attachToVehicleId?: string | null
+  ): ActionResult & { wagonId?: string } {
+    const wSpec = RAIL_WAGON_CATALOG[cargoType];
+    if (!wSpec) {
+      return { ok: false, message: 'Ugyldig vogntype.' };
+    }
+
+    const depotTile = this.resolvePlayerDepotTile(depotX, depotY, 'RAIL');
+    if (!depotTile) {
+      return {
+        ok: false,
+        message: 'Fant ikke et gyldig togdepot på denne ruten.',
+      };
+    }
+
+    let targetTrain: Vehicle | undefined;
+    if (attachToVehicleId) {
+      targetTrain = this.state.vehicles.find(
+        (v) =>
+          v.id === attachToVehicleId &&
+          v.ownerId === 'player' &&
+          v.network === 'RAIL'
+      );
+      if (
+        !targetTrain ||
+        targetTrain.state !== 'IN_DEPOT' ||
+        targetTrain.x !== depotTile.x ||
+        targetTrain.y !== depotTile.y
+      ) {
+        return {
+          ok: false,
+          message:
+            'Valgt tog må stå inne i dette togdepoet for å koble på vogner.',
+        };
+      }
+      const existingWagons = this.ensureTrainWagons(targetTrain);
+      if (existingWagons.length >= MAX_TRAIN_WAGONS) {
+        return {
+          ok: false,
+          message: `Toget har allerede maks antall vogner (${MAX_TRAIN_WAGONS} vogner)!`,
+        };
+      }
+    }
+
+    if (this.state.corporate.cash < wSpec.price) {
+      return {
+        ok: false,
+        message: `Ikke nok selskapskontanter (${formatKr(wSpec.price)} kreves).`,
+      };
+    }
+
+    this.state.corporate.cash -= wSpec.price;
+    this.state.corporate.currentYearPnL.vehiclePurchaseCost += wSpec.price;
+
+    const wagonId = `wag-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+
+    if (targetTrain) {
+      const wagons = this.ensureTrainWagons(targetTrain);
+      wagons.push({
+        id: wagonId,
+        cargoType,
+        capacity: wSpec.capacity,
+        cargoAmount: 0,
+        cargoOriginStationId: null,
+        cargoLoadedDay: this.state.date.totalDays,
+        purchaseValue: wSpec.price,
+        annualRunningCost: wSpec.annualRunningCost,
+      });
+      this.recomputeTrainConsistStats(targetTrain);
+      this.pushFloatingPopup(
+        depotTile.x,
+        depotTile.y,
+        `-kr ${formatNorwegianNumber(wSpec.price)}`,
+        'red'
+      );
+      recomputeValuationsAndWarnings(this.state);
+      this.emit();
+      return {
+        ok: true,
+        cost: wSpec.price,
+        vehicleId: targetTrain.id,
+        wagonId,
+        message: `Kjøpte ${wSpec.nameNo} og koblet på ${targetTrain.name}.`,
+      };
+    }
+
+    if (!this.state.depotWagons) {
+      this.state.depotWagons = [];
+    }
+    const stored: DepotStoredWagon = {
+      id: wagonId,
+      depotX: depotTile.x,
+      depotY: depotTile.y,
+      cargoType,
+      capacity: wSpec.capacity,
+      purchaseValue: wSpec.price,
+      annualRunningCost: wSpec.annualRunningCost,
+    };
+    this.state.depotWagons.push(stored);
+
+    this.pushFloatingPopup(
+      depotTile.x,
+      depotTile.y,
+      `-kr ${formatNorwegianNumber(wSpec.price)}`,
+      'red'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: wSpec.price,
+      wagonId,
+      message: `Kjøpte ${wSpec.nameNo} til sidespor i depoet.`,
+    };
+  }
+
+  public attachDepotWagonToTrain(
+    wagonId: string,
+    vehicleId: string,
+    insertIndex?: number
+  ): ActionResult {
+    if (!this.state.depotWagons) {
+      this.state.depotWagons = [];
+    }
+    const storedIdx = this.state.depotWagons.findIndex((w) => w.id === wagonId);
+    if (storedIdx === -1) {
+      return { ok: false, message: 'Fant ikke den ledige vognen i depoet.' };
+    }
+    const stored = this.state.depotWagons[storedIdx];
+
+    const train = this.state.vehicles.find(
+      (v) =>
+        v.id === vehicleId && v.ownerId === 'player' && v.network === 'RAIL'
+    );
+    if (
+      !train ||
+      train.state !== 'IN_DEPOT' ||
+      train.x !== stored.depotX ||
+      train.y !== stored.depotY
+    ) {
+      return {
+        ok: false,
+        message: 'Toget må stå inne i samme togdepot som vognen!',
+      };
+    }
+
+    const wagons = this.ensureTrainWagons(train);
+    if (wagons.length >= MAX_TRAIN_WAGONS) {
+      return {
+        ok: false,
+        message: `Toget har allerede maks antall vogner (${MAX_TRAIN_WAGONS} vogner)!`,
+      };
+    }
+
+    this.state.depotWagons.splice(storedIdx, 1);
+    const coupled: TrainWagon = {
+      id: stored.id,
+      cargoType: stored.cargoType,
+      capacity: stored.capacity,
+      cargoAmount: 0,
+      cargoOriginStationId: null,
+      cargoLoadedDay: this.state.date.totalDays,
+      purchaseValue: stored.purchaseValue,
+      annualRunningCost: stored.annualRunningCost,
+    };
+    const clampedIdx =
+      insertIndex === undefined
+        ? wagons.length
+        : Math.max(0, Math.min(wagons.length, Math.round(insertIndex)));
+    wagons.splice(clampedIdx, 0, coupled);
+
+    this.recomputeTrainConsistStats(train);
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      vehicleId: train.id,
+      message: `Koblet ${RAIL_WAGON_CATALOG[stored.cargoType].shortNameNo} på ${train.name}.`,
+    };
+  }
+
+  public detachTrainWagonToDepot(
+    vehicleId: string,
+    wagonId: string
+  ): ActionResult {
+    const train = this.state.vehicles.find(
+      (v) =>
+        v.id === vehicleId && v.ownerId === 'player' && v.network === 'RAIL'
+    );
+    if (!train || train.state !== 'IN_DEPOT') {
+      return {
+        ok: false,
+        message: 'Toget må stå inne i et togdepot for å koble fra vogner!',
+      };
+    }
+
+    const wagons = this.ensureTrainWagons(train);
+    const idx = wagons.findIndex((w) => w.id === wagonId);
+    if (idx === -1) {
+      return { ok: false, message: 'Fant ikke vognen på toget.' };
+    }
+
+    const [removed] = wagons.splice(idx, 1);
+    if (!this.state.depotWagons) {
+      this.state.depotWagons = [];
+    }
+    this.state.depotWagons.push({
+      id: removed.id,
+      depotX: train.x,
+      depotY: train.y,
+      cargoType: removed.cargoType,
+      capacity: removed.capacity,
+      purchaseValue: removed.purchaseValue,
+      annualRunningCost: removed.annualRunningCost,
+    });
+
+    this.recomputeTrainConsistStats(train);
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      vehicleId: train.id,
+      message: `Koblet fra ${RAIL_WAGON_CATALOG[removed.cargoType].shortNameNo} til sidesporet i depoet.`,
+    };
+  }
+
+  public moveTrainWagon(
+    fromVehicleId: string,
+    wagonId: string,
+    toVehicleId: string,
+    insertIndex?: number
+  ): ActionResult {
+    const fromTrain = this.state.vehicles.find(
+      (v) =>
+        v.id === fromVehicleId &&
+        v.ownerId === 'player' &&
+        v.network === 'RAIL'
+    );
+    const toTrain = this.state.vehicles.find(
+      (v) =>
+        v.id === toVehicleId && v.ownerId === 'player' && v.network === 'RAIL'
+    );
+    if (
+      !fromTrain ||
+      !toTrain ||
+      fromTrain.state !== 'IN_DEPOT' ||
+      toTrain.state !== 'IN_DEPOT' ||
+      fromTrain.x !== toTrain.x ||
+      fromTrain.y !== toTrain.y
+    ) {
+      return {
+        ok: false,
+        message: 'Begge tog må stå inne i samme togdepot for å flytte vogner.',
+      };
+    }
+
+    const fromWagons = this.ensureTrainWagons(fromTrain);
+    const srcIdx = fromWagons.findIndex((w) => w.id === wagonId);
+    if (srcIdx === -1) {
+      return { ok: false, message: 'Fant ikke vognen på toget.' };
+    }
+
+    if (fromVehicleId === toVehicleId) {
+      const [wag] = fromWagons.splice(srcIdx, 1);
+      const targetIdx =
+        insertIndex === undefined
+          ? fromWagons.length
+          : Math.max(0, Math.min(fromWagons.length, Math.round(insertIndex)));
+      fromWagons.splice(targetIdx, 0, wag);
+      this.recomputeTrainConsistStats(fromTrain);
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: fromTrain.id,
+        message: 'Endret vognrekkefølgen på toget.',
+      };
+    }
+
+    const toWagons = this.ensureTrainWagons(toTrain);
+    if (toWagons.length >= MAX_TRAIN_WAGONS) {
+      return {
+        ok: false,
+        message: `Måltoget har allerede maks antall vogner (${MAX_TRAIN_WAGONS} vogner)!`,
+      };
+    }
+
+    const [wag] = fromWagons.splice(srcIdx, 1);
+    const targetIdx =
+      insertIndex === undefined
+        ? toWagons.length
+        : Math.max(0, Math.min(toWagons.length, Math.round(insertIndex)));
+    toWagons.splice(targetIdx, 0, wag);
+
+    this.recomputeTrainConsistStats(fromTrain);
+    this.recomputeTrainConsistStats(toTrain);
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      vehicleId: toTrain.id,
+      message: `Flyttet ${RAIL_WAGON_CATALOG[wag.cargoType].shortNameNo} til ${toTrain.name}.`,
+    };
+  }
+
+  public sellTrainWagon(vehicleId: string, wagonId: string): ActionResult {
+    const train = this.state.vehicles.find(
+      (v) =>
+        v.id === vehicleId && v.ownerId === 'player' && v.network === 'RAIL'
+    );
+    if (!train || train.state !== 'IN_DEPOT') {
+      return {
+        ok: false,
+        message: 'Toget må stå inne i depoet for å selge enkeltvogner!',
+      };
+    }
+
+    const wagons = this.ensureTrainWagons(train);
+    const idx = wagons.findIndex((w) => w.id === wagonId);
+    if (idx === -1) {
+      return { ok: false, message: 'Fant ikke vognen på toget.' };
+    }
+
+    const [wag] = wagons.splice(idx, 1);
+    const refund = Math.round(wag.purchaseValue * 0.85);
+    this.state.corporate.cash += refund;
+
+    this.recomputeTrainConsistStats(train);
+    this.pushFloatingPopup(
+      train.x,
+      train.y,
+      `+kr ${formatNorwegianNumber(refund)}`,
+      'green'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: -refund,
+      vehicleId: train.id,
+      message: `Solgte ${RAIL_WAGON_CATALOG[wag.cargoType].shortNameNo} for ${formatKr(refund)} (85 %).`,
+    };
+  }
+
+  public sellDepotWagon(wagonId: string): ActionResult {
+    if (!this.state.depotWagons) {
+      this.state.depotWagons = [];
+    }
+    const idx = this.state.depotWagons.findIndex((w) => w.id === wagonId);
+    if (idx === -1) {
+      return { ok: false, message: 'Fant ikke vognen på sidesporet.' };
+    }
+
+    const [wag] = this.state.depotWagons.splice(idx, 1);
+    const refund = Math.round(wag.purchaseValue * 0.85);
+    this.state.corporate.cash += refund;
+
+    this.pushFloatingPopup(
+      wag.depotX,
+      wag.depotY,
+      `+kr ${formatNorwegianNumber(refund)}`,
+      'green'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: -refund,
+      message: `Solgte ${RAIL_WAGON_CATALOG[wag.cargoType].shortNameNo} fra depoet for ${formatKr(refund)} (85 %).`,
+    };
+  }
+
+  public refitRoadVehicleInDepot(
+    vehicleId: string,
+    newCargoType: CargoType
+  ): ActionResult {
+    const vehicle = this.state.vehicles.find(
+      (v) =>
+        v.id === vehicleId && v.ownerId === 'player' && v.network === 'ROAD'
+    );
+    if (!vehicle) {
+      return { ok: false, message: 'Fant ikke kjøretøyet.' };
+    }
+    if (vehicle.modelId !== 'TRUCK_CARGO') {
+      return {
+        ok: false,
+        message: 'Kun godslastebiler kan bygges om til ny lasttype.',
+      };
+    }
+    if (vehicle.state !== 'IN_DEPOT') {
+      return {
+        ok: false,
+        message: 'Lastebilen må stå inne i et veidepot for ombygging!',
+      };
+    }
+    if (newCargoType === 'PASSENGERS') {
+      return {
+        ok: false,
+        message: 'Lastebil kan ikke bygges om til passasjerbuss.',
+      };
+    }
+    if (vehicle.cargoType === newCargoType) {
+      return {
+        ok: true,
+        cost: 0,
+        vehicleId: vehicle.id,
+        message: 'Lastebilen er allerede rigget for denne lasttypen.',
+      };
+    }
+    if (this.state.corporate.cash < ROAD_REFIT_COST_KR) {
+      return {
+        ok: false,
+        message: `Ikke nok selskapskontanter (${formatKr(ROAD_REFIT_COST_KR)} kreves for ombygging).`,
+      };
+    }
+
+    this.state.corporate.cash -= ROAD_REFIT_COST_KR;
+    this.state.corporate.currentYearPnL.vehicleRunningCost +=
+      ROAD_REFIT_COST_KR;
+
+    const targetShop = ROAD_VEHICLE_SHOP_LIST.find(
+      (item) =>
+        item.modelId === 'TRUCK_CARGO' && item.cargoType === newCargoType
+    );
+
+    vehicle.cargoType = newCargoType;
+    vehicle.cargoAmount = 0;
+    vehicle.cargoOriginStationId = null;
+    if (targetShop) {
+      vehicle.capacity = targetShop.capacity;
+      vehicle.maxSpeedKmh = targetShop.maxSpeedKmh;
+      vehicle.baseAnnualRunningCost = targetShop.annualRunningCost;
+      vehicle.runningCostPerMonth = Math.round(
+        targetShop.annualRunningCost / 12
+      );
+    }
+
+    const basePart = vehicle.name.split(' (')[0];
+    vehicle.name = `${basePart} (${CARGO_LABELS_NO[newCargoType]})`;
+
+    this.pushFloatingPopup(
+      vehicle.x,
+      vehicle.y,
+      `-kr ${formatNorwegianNumber(ROAD_REFIT_COST_KR)}`,
+      'red'
+    );
+    recomputeValuationsAndWarnings(this.state);
+    this.emit();
+
+    return {
+      ok: true,
+      cost: ROAD_REFIT_COST_KR,
+      vehicleId: vehicle.id,
+      message: `Bygde om ${vehicle.name} for ${formatKr(ROAD_REFIT_COST_KR)}.`,
+    };
+  }
+
+  public sendVehicleToDepot(
+    vehicleId: string,
+    targetDepot?: { x: number; y: number },
+    forceImmediate = false
+  ): ActionResult {
+    const vehicle = this.state.vehicles.find(
+      (v) => v.id === vehicleId && v.ownerId === 'player'
+    );
+    if (!vehicle) {
+      return { ok: false, message: 'Fant ikke kjøretøyet.' };
+    }
+
+    const playerDepots = this.state.tiles.filter(
+      (t) => t.depot === vehicle.network && (!t.ownerId || t.ownerId === 'player')
+    );
+    if (playerDepots.length === 0) {
+      return {
+        ok: false,
+        message:
+          vehicle.network === 'RAIL'
+            ? 'Du har ingen togdepot! Bygg et togdepot på sporet først.'
+            : 'Du har ingen veidepot! Bygg et veidepot først.',
+      };
+    }
+
+    let chosenDepot: Tile | undefined;
+    if (
+      targetDepot &&
+      inBounds(targetDepot.x, targetDepot.y, this.state.mapSize)
+    ) {
+      const cand =
+        this.state.tiles[
+          tileIndex(targetDepot.x, targetDepot.y, this.state.mapSize)
+        ];
+      if (
+        cand.depot === vehicle.network &&
+        (!cand.ownerId || cand.ownerId === 'player')
+      ) {
+        chosenDepot = cand;
+      }
+    }
+
+    if (!chosenDepot) {
+      const sorted = [...playerDepots].sort(
+        (a, b) =>
+          Math.abs(a.x - vehicle.x) +
+          Math.abs(a.y - vehicle.y) -
+          (Math.abs(b.x - vehicle.x) + Math.abs(b.y - vehicle.y))
+      );
+      for (const dep of sorted) {
+        if (dep.x === vehicle.x && dep.y === vehicle.y) {
+          chosenDepot = dep;
+          break;
+        }
+        const p = findNetworkPath(
+          this.state.tiles,
+          this.state.mapSize,
+          vehicle.x,
+          vehicle.y,
+          [{ x: dep.x, y: dep.y }],
+          vehicle.network
+        );
+        if (p.length > 0) {
+          chosenDepot = dep;
+          break;
+        }
+      }
+      if (!chosenDepot) {
+        chosenDepot = sorted[0];
+      }
+    }
+
+    if (
+      vehicle.state === 'IN_DEPOT' &&
+      vehicle.x === chosenDepot.x &&
+      vehicle.y === chosenDepot.y
+    ) {
+      vehicle.goingToDepot = null;
+      vehicle.depotX = chosenDepot.x;
+      vehicle.depotY = chosenDepot.y;
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: vehicle.id,
+        message: `${vehicle.name} står allerede i dette depoet.`,
+      };
+    }
+
+    const wasAlreadyGoingToDepot = Boolean(vehicle.goingToDepot);
+    const wasStoppedOrInOtherDepot =
+      vehicle.state === 'STOPPED' || vehicle.state === 'IN_DEPOT';
+
+    if (vehicle.x === chosenDepot.x && vehicle.y === chosenDepot.y) {
+      this.parkVehicleInDepot(vehicle, chosenDepot.x, chosenDepot.y);
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: vehicle.id,
+        message: `${vehicle.name} er parkert i depoet.`,
+      };
+    }
+
+    if (forceImmediate || (vehicle.network === 'RAIL' && vehicle.wagonCount <= 0)) {
+      this.parkVehicleInDepot(vehicle, chosenDepot.x, chosenDepot.y);
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: vehicle.id,
+        message: `${vehicle.name} ble flyttet inn i depoet.`,
+      };
+    }
+
+    const pathToDepot = findNetworkPath(
+      this.state.tiles,
+      this.state.mapSize,
+      vehicle.x,
+      vehicle.y,
+      [{ x: chosenDepot.x, y: chosenDepot.y }],
+      vehicle.network
+    );
+
+    if (
+      pathToDepot.length === 0 &&
+      (wasAlreadyGoingToDepot || wasStoppedOrInOtherDepot)
+    ) {
+      this.parkVehicleInDepot(vehicle, chosenDepot.x, chosenDepot.y);
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: vehicle.id,
+        message: `${vehicle.name} ble hentet rett inn i depoet.`,
+      };
+    }
+
+    vehicle.goingToDepot = { x: chosenDepot.x, y: chosenDepot.y };
+    vehicle.depotX = chosenDepot.x;
+    vehicle.depotY = chosenDepot.y;
+    vehicle.loadingTicksRemaining = 0;
+
+    if (pathToDepot.length > 0) {
+      if (
+        vehicle.progress > 0 &&
+        (pathToDepot[0].x !== vehicle.nextX ||
+          pathToDepot[0].y !== vehicle.nextY)
+      ) {
+        vehicle.progress = 0;
+        vehicle.nextX = pathToDepot[0].x;
+        vehicle.nextY = pathToDepot[0].y;
+      }
+      vehicle.path = pathToDepot;
+      vehicle.state = 'MOVING';
+      this.emit();
+      return {
+        ok: true,
+        vehicleId: vehicle.id,
+        message: `${vehicle.name} kjører til depot (${chosenDepot.x}, ${chosenDepot.y})...`,
+      };
+    }
+
+    vehicle.path = [];
+    vehicle.state = 'STOPPED';
+    vehicle.speedKmh = 0;
+    this.emit();
+    return {
+      ok: true,
+      vehicleId: vehicle.id,
+      message:
+        'Ingen direkte spor-/veiforbindelse til depoet — klikk «Flytt rett inn nå» for å hente kjøretøyet inn.',
+    };
+  }
+
+  public cancelSendToDepot(vehicleId: string): ActionResult {
+    const vehicle = this.state.vehicles.find(
+      (v) => v.id === vehicleId && v.ownerId === 'player'
+    );
+    if (!vehicle) {
+      return { ok: false, message: 'Fant ikke kjøretøyet.' };
+    }
+
+    vehicle.goingToDepot = null;
+    vehicle.path = [];
+    if (vehicle.state !== 'IN_DEPOT') {
+      if (vehicle.orders.length > 0) {
+        vehicle.state = 'MOVING';
+      } else {
+        vehicle.state = 'STOPPED';
+        vehicle.speedKmh = 0;
+      }
+    }
+
+    this.emit();
+    return {
+      ok: true,
+      vehicleId: vehicle.id,
+      message: `${vehicle.name} gjenopptar ordinær kjøreordre.`,
+    };
+  }
+
   public updateVehicleOrders(
     vehicleId: string,
     orders: string[],
@@ -1974,11 +3226,26 @@ export class GameEngine {
     if (cargoType) {
       const spec = VEHICLE_CATALOG[vehicle.modelId];
       if (spec.supportedCargos.includes(cargoType) && vehicle.cargoType !== cargoType) {
-        vehicle.cargoType = cargoType;
-        vehicle.cargoAmount = 0;
-        vehicle.cargoOriginStationId = null;
-        const basePart = vehicle.name.split(' (')[0];
-        vehicle.name = `${basePart} (${CARGO_LABELS_NO[cargoType]})`;
+        if (vehicle.network === 'ROAD') {
+          vehicle.cargoType = cargoType;
+          vehicle.cargoAmount = 0;
+          vehicle.cargoOriginStationId = null;
+          const basePart = vehicle.name.split(' (')[0];
+          vehicle.name = `${basePart} (${CARGO_LABELS_NO[cargoType]})`;
+        } else {
+          const wagons = this.ensureTrainWagons(vehicle);
+          const isUniform =
+            wagons.length > 0 &&
+            wagons.every((w) => w.cargoType === wagons[0].cargoType);
+          if (isUniform) {
+            for (const w of wagons) {
+              w.cargoType = cargoType;
+              w.cargoAmount = 0;
+              w.cargoOriginStationId = null;
+            }
+            this.recomputeTrainConsistStats(vehicle);
+          }
+        }
       }
     }
 
@@ -1990,16 +3257,32 @@ export class GameEngine {
     }
     vehicle.path = [];
 
-    // Automatically dispatch out of depot when given station orders
+    // Automatically dispatch out of depot when given station orders — EXCEPT 0-wagon trains!
     if (vehicle.orders.length > 0 && vehicle.state === 'IN_DEPOT') {
-      vehicle.state = 'MOVING';
-    } else if (vehicle.orders.length === 0 && vehicle.state === 'MOVING') {
+      const canDispatch =
+        vehicle.network !== 'RAIL' || this.ensureTrainWagons(vehicle).length > 0;
+      if (canDispatch) {
+        vehicle.goingToDepot = null;
+        vehicle.state = 'MOVING';
+      }
+    } else if (
+      vehicle.orders.length === 0 &&
+      vehicle.state === 'MOVING' &&
+      !vehicle.goingToDepot
+    ) {
       vehicle.state = 'STOPPED';
       vehicle.speedKmh = 0;
     }
 
     this.emit();
-    return { ok: true, vehicleId: vehicle.id, message: 'Kjøreordre oppdatert.' };
+    return {
+      ok: true,
+      vehicleId: vehicle.id,
+      message:
+        vehicle.network === 'RAIL' && this.ensureTrainWagons(vehicle).length === 0
+          ? 'Kjøreordre lagret! Koble på minst én vogn i depoet før toget kan starte.'
+          : 'Kjøreordre oppdatert.',
+    };
   }
 
   public toggleVehicleStopped(vehicleId: string): ActionResult {
@@ -2011,15 +3294,27 @@ export class GameEngine {
     }
 
     if (vehicle.state === 'STOPPED' || vehicle.state === 'IN_DEPOT') {
+      if (
+        vehicle.network === 'RAIL' &&
+        this.ensureTrainWagons(vehicle).length === 0
+      ) {
+        return {
+          ok: false,
+          message:
+            'Toget har ingen vogner! Kjøp og koble på minst én vogn i depoet før start.',
+        };
+      }
       if (vehicle.orders.length === 0) {
         return {
           ok: false,
           message: 'Legg til minst én stasjon i kjøreordren før start!',
         };
       }
+      vehicle.goingToDepot = null;
       vehicle.state = 'MOVING';
       vehicle.path = [];
     } else {
+      vehicle.goingToDepot = null;
       vehicle.state = 'STOPPED';
       vehicle.speedKmh = 0;
     }
@@ -2295,7 +3590,10 @@ export class GameEngine {
     };
   }
 
-  public sellVehicle(vehicleId: string): ActionResult {
+  public sellVehicle(
+    vehicleId: string,
+    options?: { keepWagonsInDepot?: boolean }
+  ): ActionResult {
     const idx = this.state.vehicles.findIndex(
       (v) => v.id === vehicleId && v.ownerId === 'player'
     );
@@ -2304,9 +3602,49 @@ export class GameEngine {
     }
 
     const v = this.state.vehicles[idx];
-    const resaleValue = Math.round(
-      v.purchaseValue * Math.max(0.25, 0.85 - v.ageMonths * 0.008)
-    );
+    const depFactor = Math.max(0.25, 0.85 - v.ageMonths * 0.008);
+
+    if (options?.keepWagonsInDepot && v.network === 'RAIL') {
+      const wagons = this.ensureTrainWagons(v);
+      const depX = v.state === 'IN_DEPOT' ? v.x : (v.depotX ?? v.x);
+      const depY = v.state === 'IN_DEPOT' ? v.y : (v.depotY ?? v.y);
+
+      if (!this.state.depotWagons) {
+        this.state.depotWagons = [];
+      }
+      for (const w of wagons) {
+        this.state.depotWagons.push({
+          id: w.id,
+          depotX: depX,
+          depotY: depY,
+          cargoType: w.cargoType,
+          capacity: w.capacity,
+          purchaseValue: w.purchaseValue,
+          annualRunningCost: w.annualRunningCost,
+        });
+      }
+
+      const locoPrice = (VEHICLE_CATALOG[v.modelId] ?? VEHICLE_CATALOG.LOCO_STEAM).price;
+      const locoResale = Math.round(locoPrice * depFactor);
+      this.state.vehicles.splice(idx, 1);
+      this.state.corporate.cash += locoResale;
+      this.pushFloatingPopup(
+        v.x,
+        v.y,
+        `+kr ${formatNorwegianNumber(locoResale)}`,
+        'green'
+      );
+      recomputeValuationsAndWarnings(this.state);
+      this.emit();
+
+      return {
+        ok: true,
+        cost: -locoResale,
+        message: `Solgte kun lokomotivet fra ${v.name} for ${formatKr(locoResale)} (${wagons.length} vogner satt på sidespor i depoet).`,
+      };
+    }
+
+    const resaleValue = Math.round(v.purchaseValue * depFactor);
     this.state.vehicles.splice(idx, 1);
     this.state.corporate.cash += resaleValue;
     this.pushFloatingPopup(
@@ -2485,47 +3823,68 @@ export class GameEngine {
         lastVehicleMaxSpeedKmh: s.lastVehicleMaxSpeedKmh ?? 88,
       }));
 
-    const vehicles: Vehicle[] = this.state.vehicles
+    const vehicles: RemoteVehicleSnapshot[] = this.state.vehicles
       .filter((v) => v.ownerId === 'player')
-      .map((v) => ({
-        id: v.id,
-        name: v.name,
-        ownerId: clientId,
-        network: v.network,
-        modelId: v.modelId,
-        cargoType: v.cargoType,
-        capacity: v.capacity,
-        cargoAmount: v.cargoAmount,
-        cargoOriginStationId: v.cargoOriginStationId,
-        cargoLoadedDay: v.cargoLoadedDay,
-        x: v.x,
-        y: v.y,
-        nextX: v.nextX,
-        nextY: v.nextY,
-        progress: v.progress,
-        direction: v.direction,
-        speedKmh: v.speedKmh,
-        maxSpeedKmh: v.maxSpeedKmh,
-        state: v.state,
-        orders: [...v.orders],
-        currentOrderIndex: v.currentOrderIndex,
-        path: v.path.map((pt) => ({ x: pt.x, y: pt.y })),
-        profitThisYear: v.profitThisYear,
-        runningCostPerMonth: v.runningCostPerMonth,
-        purchaseValue: v.purchaseValue,
-        ageMonths: v.ageMonths,
-        wagonCount: v.wagonCount,
-        trail: (v.trail ?? [{ x: v.x, y: v.y }]).map((pt) => ({
-          x: pt.x,
-          y: pt.y,
-        })),
-        depotX: v.depotX ?? v.x,
-        depotY: v.depotY ?? v.y,
-        loadingTicksRemaining: v.loadingTicksRemaining ?? 0,
-        waitForFullLoad: Boolean(v.waitForFullLoad),
-        accelTicks: v.accelTicks ?? 0,
-        fullLoadWaitTicks: v.fullLoadWaitTicks ?? 0,
-      }));
+      .map((v) => {
+        const railWagons =
+          v.network === 'RAIL' ? this.ensureTrainWagons(v) : null;
+        const snap: RemoteVehicleSnapshot = {
+          id: v.id,
+          name: v.name,
+          ownerId: clientId,
+          network: v.network,
+          modelId: v.modelId,
+          cargoType: v.cargoType,
+          capacity: v.capacity,
+          cargoAmount: v.cargoAmount,
+          cargoOriginStationId: v.cargoOriginStationId ?? null,
+          cargoLoadedDay: v.cargoLoadedDay,
+          x: v.x,
+          y: v.y,
+          nextX: v.nextX,
+          nextY: v.nextY,
+          progress: v.progress,
+          direction: v.direction,
+          speedKmh: v.speedKmh,
+          maxSpeedKmh: v.maxSpeedKmh,
+          state: v.state,
+          orders: [...v.orders],
+          currentOrderIndex: v.currentOrderIndex,
+          path: v.path.map((pt) => ({ x: pt.x, y: pt.y })),
+          profitThisYear: v.profitThisYear,
+          runningCostPerMonth: v.runningCostPerMonth,
+          purchaseValue: v.purchaseValue,
+          ageMonths: v.ageMonths,
+          wagonCount: v.wagonCount,
+          goingToDepot: v.goingToDepot
+            ? { x: v.goingToDepot.x, y: v.goingToDepot.y }
+            : null,
+          trail: (v.trail ?? [{ x: v.x, y: v.y }]).map((pt) => ({
+            x: pt.x,
+            y: pt.y,
+          })),
+          depotX: v.depotX ?? v.x,
+          depotY: v.depotY ?? v.y,
+          loadingTicksRemaining: v.loadingTicksRemaining ?? 0,
+          waitForFullLoad: Boolean(v.waitForFullLoad),
+          accelTicks: v.accelTicks ?? 0,
+          fullLoadWaitTicks: v.fullLoadWaitTicks ?? 0,
+        };
+        if (railWagons) {
+          snap.wt = railWagons.map((w) => w.cargoType);
+          snap.wagons = railWagons.map((w) => ({
+            id: w.id,
+            cargoType: w.cargoType,
+            capacity: w.capacity,
+            cargoAmount: w.cargoAmount,
+            cargoOriginStationId: w.cargoOriginStationId ?? null,
+            cargoLoadedDay: w.cargoLoadedDay,
+            purchaseValue: w.purchaseValue,
+            annualRunningCost: w.annualRunningCost,
+          }));
+        }
+        return snap;
+      });
 
     const curProfit = calculatePnLOperatingProfit(
       this.state.corporate.currentYearPnL
@@ -2707,9 +4066,36 @@ export class GameEngine {
           continue;
         }
         if (this.state.vehicles.some((v) => v.id === rawVeh.id)) continue;
+        let syncedWagons: TrainWagon[] | undefined;
+        if (rawVeh.network === 'RAIL') {
+          if (Array.isArray(rawVeh.wagons)) {
+            syncedWagons = rawVeh.wagons;
+          } else if (Array.isArray(rawVeh.wt)) {
+            syncedWagons = rawVeh.wt.map((ct, idx) => {
+              const ws = RAIL_WAGON_CATALOG[ct] ?? RAIL_WAGON_CATALOG.COAL;
+              return {
+                id: `${rawVeh.id}-w-${idx + 1}`,
+                cargoType: ct,
+                capacity: ws.capacity,
+                cargoAmount: 0,
+                cargoOriginStationId: null,
+                cargoLoadedDay: this.state.date.totalDays,
+                purchaseValue: ws.price,
+                annualRunningCost: ws.annualRunningCost,
+              };
+            });
+          }
+        }
         const normalizedVehicle: Vehicle = {
           ...rawVeh,
           ownerId: peerId,
+          wagons: syncedWagons,
+          wt:
+            rawVeh.network === 'RAIL'
+              ? Array.isArray(rawVeh.wt)
+                ? rawVeh.wt
+                : syncedWagons?.map((w) => w.cargoType)
+              : undefined,
           orders: Array.isArray(rawVeh.orders) ? rawVeh.orders : [],
           path: Array.isArray(rawVeh.path) ? rawVeh.path : [],
           trail:
@@ -2717,6 +4103,9 @@ export class GameEngine {
               ? rawVeh.trail
               : [{ x: rawVeh.x, y: rawVeh.y }],
         };
+        if (normalizedVehicle.network === 'RAIL' && !normalizedVehicle.wagons) {
+          this.ensureTrainWagons(normalizedVehicle);
+        }
         this.state.vehicles.push(normalizedVehicle);
       }
     }
@@ -2783,6 +4172,14 @@ export class GameEngine {
       return { ok: false, message: res.error ?? 'Ugyldig lagringsfil.' };
     }
     this.state = res.state;
+    if (!Array.isArray(this.state.depotWagons)) {
+      this.state.depotWagons = [];
+    }
+    for (const v of this.state.vehicles) {
+      if (v.network === 'RAIL') {
+        this.ensureTrainWagons(v);
+      }
+    }
     this.subTickCounter = 0;
     updateStationRatings(this.state);
     recomputeValuationsAndWarnings(this.state);
@@ -2802,6 +4199,14 @@ export class GameEngine {
     const loaded = loadStateFromLocalStorage();
     if (!loaded) return false;
     this.state = loaded;
+    if (!Array.isArray(this.state.depotWagons)) {
+      this.state.depotWagons = [];
+    }
+    for (const v of this.state.vehicles) {
+      if (v.network === 'RAIL') {
+        this.ensureTrainWagons(v);
+      }
+    }
     this.subTickCounter = 0;
     updateStationRatings(this.state);
     recomputeValuationsAndWarnings(this.state);

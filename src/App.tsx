@@ -44,6 +44,7 @@ import {
   DepotAndOrdersWindow,
   type DepotSelection,
 } from './ui/windows/DepotAndOrdersWindow';
+import { VehicleDetailWindow } from './ui/windows/VehicleDetailWindow';
 import { CompanyFinancesWindow } from './ui/windows/CompanyFinancesWindow';
 import { PersonalFinancesWindow } from './ui/windows/PersonalFinancesWindow';
 import { HQWindow } from './ui/windows/HQWindow';
@@ -312,6 +313,9 @@ export const App: React.FC = () => {
           : cur
       );
     }
+    if (wid === 'vehicle_detail') {
+      setPickingOrdersForVehicleId(null);
+    }
   }, []);
 
   const toggleWindow = useCallback((id: WindowId) => {
@@ -441,7 +445,6 @@ export const App: React.FC = () => {
         return;
       }
       setSelectedDepot({ x, y, depotType });
-      setSelectedVehicleId(null);
       openWindow('depot');
     },
     [engine, openWindow]
@@ -452,7 +455,7 @@ export const App: React.FC = () => {
       const veh = engine.getState().vehicles.find((v) => v.id === vehicleId);
       if (!veh) return;
       setSelectedVehicleId(vehicleId);
-      openWindow('depot');
+      openWindow('vehicle_detail');
     },
     [engine, openWindow]
   );
@@ -992,7 +995,7 @@ export const App: React.FC = () => {
           onFocusTile={handleFocusTile}
           onInspectVehicle={(vid) => {
             setSelectedVehicleId(vid);
-            openWindow('depot');
+            openWindow('vehicle_detail');
           }}
         />
       )}
@@ -1005,7 +1008,7 @@ export const App: React.FC = () => {
           onClose={closeWindow}
           onInspectVehicle={(vid) => {
             setSelectedVehicleId(vid);
-            openWindow('depot');
+            openWindow('vehicle_detail');
           }}
           onFocusTile={handleFocusTile}
         />
@@ -1017,18 +1020,40 @@ export const App: React.FC = () => {
           state={state}
           selectedDepot={selectedDepot}
           selectedVehicleId={selectedVehicleId}
-          isPickingStationOrder={Boolean(pickingOrdersForVehicleId)}
           zIndex={getZIndex('depot')}
           onFocus={bringToFront}
           onClose={closeWindow}
           onSelectVehicle={setSelectedVehicleId}
           onSelectDepot={setSelectedDepot}
+          onOpenVehicleDetail={(vid) => {
+            setSelectedVehicleId(vid);
+            openWindow('vehicle_detail');
+          }}
+          onFocusTile={handleFocusTile}
+        />
+      )}
+
+      {openWindows.has('vehicle_detail') && (
+        <VehicleDetailWindow
+          engine={engine}
+          state={state}
+          vehicleId={selectedVehicleId}
+          pickingOrdersForVehicleId={pickingOrdersForVehicleId}
+          zIndex={getZIndex('vehicle_detail')}
+          onFocus={bringToFront}
+          onClose={closeWindow}
+          onSelectVehicle={setSelectedVehicleId}
           onToggleStationPicker={(vid) => {
             if (vid) setActiveTool('SELECT');
             setPickingOrdersForVehicleId(vid);
           }}
           onFocusTile={handleFocusTile}
           onOpenStation={handleOpenStation}
+          onOpenDepotAt={(x, y, depotType, vid) => {
+            setSelectedDepot({ x, y, depotType });
+            setSelectedVehicleId(vid);
+            openWindow('depot');
+          }}
         />
       )}
 

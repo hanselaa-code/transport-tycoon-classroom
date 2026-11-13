@@ -21,7 +21,6 @@ import {
 import {
   ALL_CARGO_TYPES,
   BASE_LOAN_INTEREST_RATE,
-  calculateVehicleBaseAnnualCost,
   COMPANY_COLORS,
   DEFAULT_MAX_LOAN_KR,
   formatGameDate,
@@ -29,6 +28,7 @@ import {
   getHQCumulativeValue,
   getHQTierSpec,
   getStationCatchmentRadius,
+  getVehicleAnnualRunningCost,
   HQ_BONUS_RADIUS,
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
@@ -572,6 +572,9 @@ export function recomputeValuationsAndWarnings(state: GameState): void {
       fleetBookValue += Math.round(v.purchaseValue * depFactor);
     }
   }
+  for (const dw of state.depotWagons ?? []) {
+    fleetBookValue += Math.round(dw.purchaseValue * 0.85);
+  }
 
   let infrastructureCount = 0;
   for (const t of state.tiles) {
@@ -934,7 +937,7 @@ export function runMonthlyEconomyTick(state: GameState): void {
   // 1. Player Vehicle Running Costs
   for (const v of state.vehicles) {
     v.ageMonths += 1;
-    const baseAnnual = calculateVehicleBaseAnnualCost(v.modelId, v.wagonCount);
+    const baseAnnual = getVehicleAnnualRunningCost(v);
     const stateKey =
       v.state === 'MOVING'
         ? 'moving'

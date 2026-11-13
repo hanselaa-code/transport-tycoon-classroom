@@ -316,8 +316,24 @@ function createSpawnedVehicle(
   const nextStep = initialPath[0] ?? startPt;
 
   const prefixPart = idPrefix ? `${idPrefix}-` : '';
+  const vehId = `veh-${prefixPart}${state.vehicles.length + 1}-${Math.random().toString(36).slice(2, 5)}`;
+  const railWagonsCount = spec.network === 'RAIL' ? Math.max(0, Math.round(wagonCount)) : 0;
+  const builtWagons =
+    spec.network === 'RAIL'
+      ? Array.from({ length: railWagonsCount }, (_, idx) => ({
+          id: `${vehId}-w-${idx + 1}`,
+          cargoType,
+          capacity: spec.capacityPerWagon,
+          cargoAmount: 0,
+          cargoOriginStationId: null,
+          cargoLoadedDay: state.date.totalDays,
+          purchaseValue: spec.wagonPrice,
+          annualRunningCost: spec.runningCostPerWagon,
+        }))
+      : undefined;
+
   const vehicle: Vehicle = {
-    id: `veh-${prefixPart}${state.vehicles.length + 1}-${Math.random().toString(36).slice(2, 5)}`,
+    id: vehId,
     name: `${prefix} #${numForOwner} (${CARGO_LABELS_NO[cargoType]})`,
     ownerId,
     network: spec.network,
@@ -341,9 +357,13 @@ function createSpawnedVehicle(
     path: initialPath,
     profitThisYear: 0,
     runningCostPerMonth: Math.round(annualCost / 12),
+    baseAnnualRunningCost: annualCost,
     purchaseValue,
     ageMonths: 0,
-    wagonCount: spec.network === 'RAIL' ? wagonCount : 0,
+    wagonCount: railWagonsCount,
+    wagons: builtWagons,
+    wt: builtWagons ? builtWagons.map((w) => w.cargoType) : undefined,
+    goingToDepot: null,
     trail: [{ x: startPt.x, y: startPt.y }],
     depotX: depotPt.x,
     depotY: depotPt.y,

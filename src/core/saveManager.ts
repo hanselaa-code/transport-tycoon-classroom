@@ -50,6 +50,7 @@ export function serializeGameState(state: GameState): string {
       remoteIds.size > 0
         ? state.vehicles.filter((v) => !remoteIds.has(v.ownerId))
         : state.vehicles,
+    depotWagons: [...(state.depotWagons ?? [])],
     remotePlayers: [],
     popups: [],
     lastSavedAtMs: Date.now(),
@@ -96,6 +97,9 @@ export function deserializeGameState(rawJson: string): {
       industries: candidate.industries,
       stations: candidate.stations,
       vehicles: candidate.vehicles,
+      depotWagons: Array.isArray(candidate.depotWagons)
+        ? candidate.depotWagons
+        : [],
       popups: [],
       date: candidate.date,
       speed: candidate.speed ?? 1,

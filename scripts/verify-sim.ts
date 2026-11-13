@@ -24,9 +24,14 @@ import {
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
   LOAN_STEP_KR,
+  MAX_TRAIN_WAGONS,
   NORWEGIAN_TOWN_NAMES,
   RAIL_STATION_CATCHMENT_RADIUS,
+  RAIL_WAGON_CATALOG,
+  RAIL_WAGON_CATALOG_LIST,
+  ROAD_REFIT_COST_KR,
   ROAD_STATION_CATCHMENT_RADIUS,
+  ROAD_VEHICLE_SHOP_LIST,
   TOTAL_AI_SHARES,
   VEHICLE_CATALOG,
   createGameEngine,
@@ -2102,6 +2107,466 @@ async function main(): Promise<void> {
 
   console.log(
     `  [OK] Zero-"dumpel" seamless profile (0.0000 dip/hump), WOOD/STEEL/MODERN 3D spans, MP sync & speed caps (${maxBridgeSpeedObserved.WOOD}/${maxBridgeSpeedObserved.STEEL}/${maxBridgeSpeedObserved.MODERN} km/t) verified.`
+  );
+
+  // =========================================================================
+  // 12. Round 7 OpenTTD Depots, Separate Locomotives & Wagons, Mixed Consists & Send-to-Depot
+  // =========================================================================
+  section(
+    '12. Round 7 OpenTTD Depots, Separate Locomotives & Wagons, Mixed Consists, Wagon Swapping & Send-to-Depot'
+  );
+
+  assertEq(MAX_TRAIN_WAGONS, 8, 'MAX_TRAIN_WAGONS === 8');
+  assertEq(ROAD_REFIT_COST_KR, 5_000, 'ROAD_REFIT_COST_KR === 5 000 kr');
+  assertEq(
+    RAIL_WAGON_CATALOG_LIST.length,
+    7,
+    'RAIL_WAGON_CATALOG_LIST contains all 7 specialized rail wagons'
+  );
+  assertEq(
+    ROAD_VEHICLE_SHOP_LIST.length,
+    7,
+    'ROAD_VEHICLE_SHOP_LIST contains all 7 specialized road vehicles (1 bus + 6 cargo trucks)'
+  );
+
+  const r7Engine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'very_low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260701,
+    },
+  });
+  r7Engine.grantDevFunds('corporate', 25_000_000);
+  const r7State = r7Engine.getState();
+
+  // Clear deterministic flat railway & road testbed in rows y=10..30, cols x=8..54
+  for (let cy = 10; cy <= 30; cy++) {
+    for (let cx = 8; cx <= 54; cx++) {
+      const t = r7State.tiles[tileIndex(cx, cy, 64)];
+      t.industryId = undefined;
+      t.townId = undefined;
+      t.buildingTier = undefined;
+      t.stationId = undefined;
+      t.depot = null;
+      t.hqOwnerId = null;
+      t.ownerId = null;
+      t.road = false;
+      t.rail = false;
+      t.signal = false;
+      t.bridge = null;
+      t.bridgeAxis = undefined;
+      t.bridgeType = null;
+      t.bridgeElevation = undefined;
+      t.terrain = 'GRASS';
+      t.elevation = 1;
+    }
+  }
+
+  // Place synthetic Power Plant anchor near (46, 13) so stCoalB at (46, 15) accepts COAL,
+  // and synthetic Town buildings near (14, 21) & (46, 21) so stTownA & stTownB accept PASSENGERS + MAIL!
+  const powerPlant = r7State.industries.find((ind) => ind.accepts.includes('COAL'));
+  const coalMine = r7State.industries.find((ind) => ind.produces === 'COAL');
+  assert(Boolean(powerPlant && coalMine), 'World contains COAL_MINE and POWER_PLANT');
+  coalMine!.x = 13;
+  coalMine!.y = 12;
+  coalMine!.width = 2;
+  coalMine!.height = 2;
+  powerPlant!.x = 45;
+  powerPlant!.y = 12;
+  powerPlant!.width = 2;
+  powerPlant!.height = 2;
+
+  const r7TownA = r7State.towns[0];
+  const r7TownB = r7State.towns[1];
+  r7TownA.x = 14;
+  r7TownA.y = 21;
+  r7TownB.x = 46;
+  r7TownB.y = 21;
+  r7State.tiles[tileIndex(14, 21, 64)].townId = r7TownA.id;
+  r7State.tiles[tileIndex(14, 21, 64)].buildingTier = 3;
+  r7State.tiles[tileIndex(46, 21, 64)].townId = r7TownB.id;
+  r7State.tiles[tileIndex(46, 21, 64)].buildingTier = 3;
+
+  // Build connected rail network: coal line (y=15), town express line (y=20), connector x=28 (y=15..20), rail depot at (28, 17)
+  assert(r7Engine.applyDragTrackOrRoad(14, 15, 46, 15, 'RAIL').ok, 'Built coal rail line y=15');
+  assert(r7Engine.applyDragTrackOrRoad(14, 20, 46, 20, 'RAIL').ok, 'Built town rail line y=20');
+  assert(r7Engine.applyDragTrackOrRoad(28, 15, 28, 20, 'RAIL').ok, 'Built north-south depot spur x=28');
+  const r7DepotX = 29;
+  const r7DepotY = 17;
+  assert(r7Engine.applyDragTrackOrRoad(28, 17, r7DepotX, r7DepotY, 'RAIL').ok, 'Built depot lead');
+  const railDepRes = r7Engine.applyTool(r7DepotX, r7DepotY, 'RAIL_DEPOT');
+  assert(railDepRes.ok, 'Built RAIL_DEPOT at (29, 17)');
+
+  const stCoalARes = r7Engine.applyTool(14, 15, 'TRAIN_STATION', { stationLength: 1, orientation: 'X' });
+  const stCoalBRes = r7Engine.applyTool(46, 15, 'TRAIN_STATION', { stationLength: 1, orientation: 'X' });
+  const stTownARes = r7Engine.applyTool(14, 20, 'TRAIN_STATION', { stationLength: 1, orientation: 'X' });
+  const stTownBRes = r7Engine.applyTool(46, 20, 'TRAIN_STATION', { stationLength: 1, orientation: 'X' });
+  assert(
+    stCoalARes.ok && stCoalBRes.ok && stTownARes.ok && stTownBRes.ok,
+    'Built coal & town train stations'
+  );
+
+  // 12a. Bare Locomotive Purchase (0 wagons) & 0-Wagon Dispatch Guard
+  const cashBeforeLoco1 = r7Engine.getState().corporate.cash;
+  const buyLoco1 = r7Engine.buyLocomotive(r7DepotX, r7DepotY, 'LOCO_DIESEL');
+  assert(buyLoco1.ok && Boolean(buyLoco1.vehicleId), `buyLocomotive succeeded: ${buyLoco1.message}`);
+  const loco1Id = buyLoco1.vehicleId!;
+  assertEq(
+    cashBeforeLoco1 - r7Engine.getState().corporate.cash,
+    VEHICLE_CATALOG.LOCO_DIESEL.price,
+    'buyLocomotive charged exact bare LOCO_DIESEL price without bundled wagons'
+  );
+
+  const loco1Initial = r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!;
+  assertEq(loco1Initial.state, 'IN_DEPOT', 'Bare locomotive starts IN_DEPOT');
+  assertEq(loco1Initial.wagonCount, 0, 'Bare locomotive has wagonCount === 0');
+  assertEq(loco1Initial.wagons?.length ?? 0, 0, 'Bare locomotive has empty wagons array');
+  assertEq(loco1Initial.capacity, 0, 'Bare locomotive has 0 cargo capacity');
+  assert(loco1Initial.name.includes('Uten vogner'), `Bare locomotive name notes no wagons (${loco1Initial.name})`);
+
+  // Assigning orders to a 0-wagon train saves orders cleanly while keeping it IN_DEPOT
+  const saveOrders0Wag = r7Engine.updateVehicleOrders(loco1Id, [stCoalARes.stationId!, stCoalBRes.stationId!]);
+  assert(saveOrders0Wag.ok, 'updateVehicleOrders saves orders on 0-wagon locomotive');
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.state,
+    'IN_DEPOT',
+    '0-wagon locomotive stays IN_DEPOT when orders are assigned'
+  );
+  const start0Wag = r7Engine.toggleVehicleStopped(loco1Id);
+  assert(!start0Wag.ok, 'toggleVehicleStopped refuses to dispatch 0-wagon locomotive');
+
+  // Verify VehicleRenderer handles 0-wagon locomotive cleanly
+  const r7VehRenderer = new VehicleRenderer();
+  r7VehRenderer.update(r7Engine.getState(), 0.016, 100);
+  assert(r7VehRenderer.group.children.length === 1, 'VehicleRenderer renders 0-wagon locomotive');
+
+  // 12b. Separate Wagon Buying, MAX_TRAIN_WAGONS=8 Cap, Spare Siding, Move/Detach/Sell & keepWagonsInDepot
+  const buyLoco2 = r7Engine.buyLocomotive(r7DepotX, r7DepotY, 'LOCO_STEAM');
+  assert(buyLoco2.ok && Boolean(buyLoco2.vehicleId), 'Bought second locomotive (LOCO_STEAM)');
+  const loco2Id = buyLoco2.vehicleId!;
+
+  const eightCargoSequence = [
+    'PASSENGERS',
+    'MAIL',
+    'COAL',
+    'WOOD',
+    'GOODS',
+    'GRAIN',
+    'FOOD',
+    'COAL',
+  ] as const;
+  for (let i = 0; i < eightCargoSequence.length; i++) {
+    const wCargo = eightCargoSequence[i];
+    const wRes = r7Engine.buyRailWagon(r7DepotX, r7DepotY, wCargo, loco2Id);
+    assert(wRes.ok && Boolean(wRes.wagonId), `Coupled wagon #${i + 1} (${wCargo}) onto loco2`);
+  }
+  const loco2Full = r7Engine.getState().vehicles.find((v) => v.id === loco2Id)!;
+  assertEq(loco2Full.wagonCount, 8, 'loco2 reached MAX_TRAIN_WAGONS (8)');
+  const ninthWagonRes = r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'COAL', loco2Id);
+  assert(!ninthWagonRes.ok, '9th wagon rejected when train is at MAX_TRAIN_WAGONS (8)');
+
+  // Reorder within loco2 (move index 2 COAL wagon to front index 0)
+  const coalWagToMove = loco2Full.wagons![2].id;
+  assert(
+    r7Engine.moveTrainWagon(loco2Id, coalWagToMove, loco2Id, 0).ok,
+    'Reordered wagon within same train via moveTrainWagon'
+  );
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco2Id)!.wagons![0].id,
+    coalWagToMove,
+    'Moved COAL wagon is now first on loco2'
+  );
+
+  // Transfer that COAL wagon directly from loco2 to loco1 via moveTrainWagon!
+  assert(
+    r7Engine.moveTrainWagon(loco2Id, coalWagToMove, loco1Id).ok,
+    'Transferred COAL wagon from loco2 to loco1 in depot'
+  );
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.wagonCount,
+    1,
+    'loco1 now has 1 COAL wagon'
+  );
+
+  // Buy a standalone COAL wagon to depot spare siding (attachToVehicleId = null), then attach to loco1, plus 1 direct COAL wagon -> 3x COAL on loco1
+  const spareBuyRes = r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'COAL', null);
+  assert(spareBuyRes.ok && Boolean(spareBuyRes.wagonId), 'Bought standalone COAL wagon onto depot spare siding');
+  assert(
+    (r7Engine.getState().depotWagons ?? []).some((w) => w.id === spareBuyRes.wagonId),
+    'Spare wagon stored in state.depotWagons'
+  );
+  assert(
+    r7Engine.attachDepotWagonToTrain(spareBuyRes.wagonId!, loco1Id).ok,
+    'Attached spare siding COAL wagon onto loco1'
+  );
+  assert(
+    r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'COAL', loco1Id).ok,
+    'Bought 3rd COAL wagon directly onto loco1'
+  );
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.capacity,
+    3 * RAIL_WAGON_CATALOG.COAL.capacity,
+    'loco1 capacity === 3 * 35 = 105t COAL'
+  );
+
+  // Sell one wagon directly off loco2 (85% refund), then sell loco2 with keepWagonsInDepot: true, then sell one spare depot wagon!
+  const wagToSellOnTrain = r7Engine.getState().vehicles.find((v) => v.id === loco2Id)!.wagons![0];
+  const cashBeforeWagSale = r7Engine.getState().corporate.cash;
+  assert(
+    r7Engine.sellTrainWagon(loco2Id, wagToSellOnTrain.id).ok,
+    'Sold single coupled wagon off loco2'
+  );
+  assertEq(
+    r7Engine.getState().corporate.cash - cashBeforeWagSale,
+    Math.round(wagToSellOnTrain.purchaseValue * 0.85),
+    'sellTrainWagon refunded exact 85% of wagon value'
+  );
+
+  const depotWagonsBeforeLocoSale = (r7Engine.getState().depotWagons ?? []).length;
+  assert(
+    r7Engine.sellVehicle(loco2Id, { keepWagonsInDepot: true }).ok,
+    'Sold loco2 with keepWagonsInDepot: true'
+  );
+  assert(
+    !r7Engine.getState().vehicles.some((v) => v.id === loco2Id),
+    'loco2 removed from active vehicles'
+  );
+  assertEq(
+    (r7Engine.getState().depotWagons ?? []).length,
+    depotWagonsBeforeLocoSale + 6,
+    'All 6 remaining wagons from loco2 preserved on state.depotWagons spare siding'
+  );
+
+  const spareToSell = r7Engine.getState().depotWagons![0];
+  const cashBeforeSpareSale = r7Engine.getState().corporate.cash;
+  assert(r7Engine.sellDepotWagon(spareToSell.id).ok, 'Sold spare siding wagon via sellDepotWagon');
+  assertEq(
+    r7Engine.getState().corporate.cash - cashBeforeSpareSale,
+    Math.round(spareToSell.purchaseValue * 0.85),
+    'sellDepotWagon refunded exact 85% of spare wagon value'
+  );
+
+  // 12c. Full Train Reconfiguration Lifecycle:
+  //      Haul COAL -> sendVehicleToDepot -> Drive into depot -> Swap to Mixed 2x PASSENGERS + 1x MAIL -> Multi-Cargo Delivery!
+  const stCoalAObj = r7Engine.getState().stations.find((s) => s.id === stCoalARes.stationId)!;
+  stCoalAObj.waitingCargo.COAL = 180;
+
+  // Dispatch loco1 (currently 3x COAL wagons, IN_DEPOT with orders [stCoalA, stCoalB])
+  assert(r7Engine.toggleVehicleStopped(loco1Id).ok, 'Dispatched loco1 out of depot with 3x COAL wagons');
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.state,
+    'MOVING',
+    'loco1 left depot in MOVING state'
+  );
+
+  for (let t = 0; t < 80 * 14; t++) {
+    r7Engine.tick(1);
+    if (r7Engine.getState().corporate.currentYearPnL.freightRevenue > 0) {
+      break;
+    }
+  }
+  const coalRevenueEarned = r7Engine.getState().corporate.currentYearPnL.freightRevenue;
+  assert(
+    coalRevenueEarned > 0,
+    `loco1 delivered COAL and earned initial freight revenue (${coalRevenueEarned} kr)`
+  );
+
+  // Test sendVehicleToDepot + cancelSendToDepot + sendVehicleToDepot driving physically into (29, 17)!
+  const sendRes1 = r7Engine.sendVehicleToDepot(loco1Id, { x: r7DepotX, y: r7DepotY });
+  assert(sendRes1.ok, `sendVehicleToDepot initiated: ${sendRes1.message}`);
+  const cancelRes = r7Engine.cancelSendToDepot(loco1Id);
+  assert(cancelRes.ok, 'cancelSendToDepot resumed normal operation');
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.goingToDepot,
+    null,
+    'cancelSendToDepot cleared goingToDepot'
+  );
+
+  const sendRes2 = r7Engine.sendVehicleToDepot(loco1Id, { x: r7DepotX, y: r7DepotY });
+  assert(sendRes2.ok, 'Re-sent loco1 to rail depot (29, 17)');
+
+  for (let t = 0; t < 60 * 14; t++) {
+    if (r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.state === 'IN_DEPOT') {
+      break;
+    }
+    r7Engine.tick(1);
+  }
+  const loco1Parked = r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!;
+  assertEq(loco1Parked.state, 'IN_DEPOT', 'loco1 drove along tracks and parked IN_DEPOT');
+  assertEq(loco1Parked.x, r7DepotX, 'loco1 parked at depot X');
+  assertEq(loco1Parked.y, r7DepotY, 'loco1 parked at depot Y');
+  assertEq(loco1Parked.goingToDepot, null, 'goingToDepot cleared upon entering depot');
+
+  r7VehRenderer.update(r7Engine.getState(), 0.016, 500);
+
+  // Detach 1 COAL wagon to spare siding and sell the other 2 COAL wagons -> loco1 back to 0 wagons
+  const oldCoalWagons = [...(loco1Parked.wagons ?? [])];
+  assertEq(oldCoalWagons.length, 3, 'loco1 arrived in depot with its 3 COAL wagons');
+  assert(
+    r7Engine.detachTrainWagonToDepot(loco1Id, oldCoalWagons[0].id).ok,
+    'Detached 1st COAL wagon to depot spare siding'
+  );
+  assert(r7Engine.sellTrainWagon(loco1Id, oldCoalWagons[1].id).ok, 'Sold 2nd COAL wagon');
+  assert(r7Engine.sellTrainWagon(loco1Id, oldCoalWagons[2].id).ok, 'Sold 3rd COAL wagon');
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.wagonCount,
+    0,
+    'loco1 stripped back to 0 wagons inside depot'
+  );
+
+  // Reconfigure the SAME locomotive with a mixed consist: 2x PASSENGERS + 1x MAIL!
+  assert(r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'PASSENGERS', loco1Id).ok, 'Coupled PASSENGERS wagon #1');
+  assert(r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'PASSENGERS', loco1Id).ok, 'Coupled PASSENGERS wagon #2');
+  assert(r7Engine.buyRailWagon(r7DepotX, r7DepotY, 'MAIL', loco1Id).ok, 'Coupled MAIL wagon #3');
+
+  const loco1Reconfigured = r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!;
+  assertEq(loco1Reconfigured.wagonCount, 3, 'Reconfigured loco1 has 3 wagons');
+  assertEq(
+    loco1Reconfigured.capacity,
+    2 * RAIL_WAGON_CATALOG.PASSENGERS.capacity + RAIL_WAGON_CATALOG.MAIL.capacity,
+    'Mixed consist capacity === 2*40 + 30 = 110'
+  );
+  assertEq(
+    loco1Reconfigured.wagons!.map((w) => w.cargoType).join(','),
+    'PASSENGERS,PASSENGERS,MAIL',
+    'Mixed consist wagon order === PASSENGERS,PASSENGERS,MAIL'
+  );
+
+  // Verify VehicleRenderer dynamically rebuilds the 3D wagon meshes for the new mixed consist!
+  r7VehRenderer.update(r7Engine.getState(), 0.016, 1000);
+  const rebuiltCargoTypes: string[] = [];
+  for (const rootObj of r7VehRenderer.group.children) {
+    for (const childObj of rootObj.children) {
+      if (childObj.userData && typeof childObj.userData.cargoType === 'string') {
+        rebuiltCargoTypes.push(childObj.userData.cargoType);
+      }
+    }
+  }
+  assertEq(
+    rebuiltCargoTypes.join(','),
+    'PASSENGERS,PASSENGERS,MAIL',
+    'VehicleRenderer rebuilt mixed 3D wagon meshes (PASSENGERS,PASSENGERS,MAIL)'
+  );
+  r7VehRenderer.dispose();
+
+  // Verify Multiplayer Slice exports `wt` per-wagon cargo array cleanly
+  const r7MpSlice = r7Engine.exportMultiplayerSlice();
+  assert(!JSON.stringify(r7MpSlice).includes('undefined'), 'Round 7 MP slice has zero undefined fields');
+  const mpTrainSnap = r7MpSlice.vehicles.find((v) => v.id === loco1Id);
+  assertEq(
+    mpTrainSnap?.wt?.join(','),
+    'PASSENGERS,PASSENGERS,MAIL',
+    'Multiplayer slice exports mixed-consist wt === PASSENGERS,PASSENGERS,MAIL'
+  );
+
+  // Seed BOTH waiting PASSENGERS and waiting MAIL at stTownA, update orders to [stTownA, stTownB], and verify simultaneous multi-cargo haul!
+  const stTownAObj = r7Engine.getState().stations.find((s) => s.id === stTownARes.stationId)!;
+  stTownAObj.waitingCargo.PASSENGERS = 120;
+  stTownAObj.waitingCargo.MAIL = 60;
+
+  const revBeforeMixedRun = r7Engine.getState().corporate.currentYearPnL.freightRevenue;
+  const dispatchMixedRes = r7Engine.updateVehicleOrders(loco1Id, [
+    stTownARes.stationId!,
+    stTownBRes.stationId!,
+  ]);
+  assert(dispatchMixedRes.ok, 'Updated orders to [stTownA, stTownB] and dispatched mixed train');
+  assertEq(
+    r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!.state,
+    'MOVING',
+    'Reconfigured mixed train automatically dispatched from depot'
+  );
+
+  let observedSimultaneousPaxAndMailOnboard = false;
+  for (let t = 0; t < 90 * 14; t++) {
+    r7Engine.tick(1);
+    const curTrain = r7Engine.getState().vehicles.find((v) => v.id === loco1Id)!;
+    const wags = curTrain.wagons ?? [];
+    const paxLoaded = wags
+      .filter((w) => w.cargoType === 'PASSENGERS')
+      .reduce((s, w) => s + w.cargoAmount, 0);
+    const mailLoaded = wags
+      .filter((w) => w.cargoType === 'MAIL')
+      .reduce((s, w) => s + w.cargoAmount, 0);
+    if (paxLoaded > 0 && mailLoaded > 0) {
+      observedSimultaneousPaxAndMailOnboard = true;
+    }
+    if (
+      observedSimultaneousPaxAndMailOnboard &&
+      r7Engine.getState().corporate.currentYearPnL.freightRevenue > revBeforeMixedRun &&
+      paxLoaded === 0 &&
+      mailLoaded === 0
+    ) {
+      break;
+    }
+  }
+
+  assert(
+    observedSimultaneousPaxAndMailOnboard,
+    'Mixed train loaded BOTH PASSENGERS and MAIL simultaneously in its separate wagons'
+  );
+  const revAfterMixedRun = r7Engine.getState().corporate.currentYearPnL.freightRevenue;
+  assert(
+    revAfterMixedRun > revBeforeMixedRun,
+    `Mixed train delivered PASSENGERS + MAIL to stTownB and earned revenue (+${revAfterMixedRun - revBeforeMixedRun} kr)`
+  );
+
+  // 12d. All 7 Specialized Road Vehicles (ROAD_VEHICLE_SHOP_LIST) & In-Depot Cargo Refit
+  const roadDepX = 20;
+  const roadDepY = 25;
+  assert(r7Engine.applyTool(roadDepX, roadDepY, 'ROAD_DEPOT').ok, 'Built ROAD_DEPOT at (20, 25)');
+
+  const boughtRoadIds: Array<{ id: string; modelId: string; cargoType: string }> = [];
+  for (const roadSpec of ROAD_VEHICLE_SHOP_LIST) {
+    const beforeRoadCash = r7Engine.getState().corporate.cash;
+    const bRes = r7Engine.buyRoadVehicle(roadDepX, roadDepY, roadSpec.shopId);
+    assert(bRes.ok && Boolean(bRes.vehicleId), `Bought road shop item ${roadSpec.shopId} (${roadSpec.nameNo})`);
+    assertEq(
+      beforeRoadCash - r7Engine.getState().corporate.cash,
+      roadSpec.price,
+      `Exact price charged for ${roadSpec.shopId} (${roadSpec.price} kr)`
+    );
+    const rv = r7Engine.getState().vehicles.find((v) => v.id === bRes.vehicleId)!;
+    assertEq(rv.state, 'IN_DEPOT', `${roadSpec.shopId} spawns IN_DEPOT`);
+    assertEq(rv.cargoType, roadSpec.cargoType, `${roadSpec.shopId} cargoType === ${roadSpec.cargoType}`);
+    assertEq(rv.capacity, roadSpec.capacity, `${roadSpec.shopId} capacity === ${roadSpec.capacity}`);
+    boughtRoadIds.push({ id: rv.id, modelId: rv.modelId, cargoType: rv.cargoType });
+  }
+
+  const busEntry = boughtRoadIds.find((b) => b.modelId === 'BUS_CITY')!;
+  const coalTruckEntry = boughtRoadIds.find(
+    (b) => b.modelId === 'TRUCK_CARGO' && b.cargoType === 'COAL'
+  )!;
+  assert(
+    !r7Engine.refitRoadVehicleInDepot(busEntry.id, 'GOODS').ok,
+    'refitRoadVehicleInDepot rejects refitting a passenger bus'
+  );
+  assert(
+    !r7Engine.refitRoadVehicleInDepot(coalTruckEntry.id, 'PASSENGERS').ok,
+    'refitRoadVehicleInDepot rejects refitting a cargo truck to PASSENGERS'
+  );
+
+  const cashBeforeRefit = r7Engine.getState().corporate.cash;
+  const refitRes = r7Engine.refitRoadVehicleInDepot(coalTruckEntry.id, 'FOOD');
+  assert(refitRes.ok, `Refitted COAL truck to FOOD reefer truck in depot: ${refitRes.message}`);
+  assertEq(
+    cashBeforeRefit - r7Engine.getState().corporate.cash,
+    ROAD_REFIT_COST_KR,
+    'refitRoadVehicleInDepot charged exact 5 000 kr'
+  );
+  const refittedTruck = r7Engine.getState().vehicles.find((v) => v.id === coalTruckEntry.id)!;
+  assertEq(refittedTruck.cargoType, 'FOOD', 'Refitted truck cargoType === FOOD');
+  const foodTruckShopSpec = ROAD_VEHICLE_SHOP_LIST.find((s) => s.cargoType === 'FOOD')!;
+  assertEq(
+    refittedTruck.capacity,
+    foodTruckShopSpec.capacity,
+    `Refitted FOOD truck capacity updated to ${foodTruckShopSpec.capacity}`
+  );
+
+  console.log(
+    '  [OK] Bare locomotives, 0-wagon guard, separate 7 rail wagons, spare siding, COAL->PASSENGERS+MAIL depot swap, 3D mixed consist rebuild & 7 road vehicles + refit verified.'
   );
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }

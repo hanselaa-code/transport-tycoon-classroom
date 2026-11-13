@@ -34,14 +34,27 @@ interface CargoTierItem {
   threshold: number;
 }
 
+interface TrainWagonLike {
+  cargoType: CargoType;
+  capacity: number;
+  cargoAmount: number;
+}
+
+type VehicleConsistCompat = Vehicle & {
+  wagons?: TrainWagonLike[];
+  wt?: CargoType[];
+};
+
 type CargoVisualSlot =
   | {
       kind: 'HEAP';
       group: THREE.Group;
+      wagonIndex?: number;
     }
   | {
       kind: 'TIERED';
       items: CargoTierItem[];
+      wagonIndex?: number;
     };
 
 interface SteamRunningGear {
@@ -59,6 +72,7 @@ interface VehicleVisualInstance {
   modelId: VehicleModelId;
   cargoType: CargoType;
   wagonCount: number;
+  wagonSignature: string;
   ownerColor: string;
 
   rootGroup: THREE.Group;
@@ -575,10 +589,30 @@ export class VehicleRenderer {
 
     for (let i = 0; i < state.vehicles.length; i++) {
       const v = state.vehicles[i];
+      const vc = v as VehicleConsistCompat;
       seenIds.add(v.id);
 
       const ownerColor = resolveOwnerColor(v.ownerId, state.aiCompanies, state);
-      const wagonCount = v.network === 'RAIL' ? Math.max(0, Math.min(8, v.wagonCount || 0)) : 0;
+      const hasWagonObjs = Boolean(vc.wagons && vc.wagons.length > 0);
+      const hasWagonTypes = Boolean(!hasWagonObjs && vc.wt && vc.wt.length > 0);
+      const rawCount = hasWagonObjs
+        ? vc.wagons!.length
+        : hasWagonTypes
+          ? vc.wt!.length
+          : v.wagonCount || 0;
+      const wagonCount = v.network === 'RAIL' ? Math.max(0, Math.min(8, rawCount)) : 0;
+
+      const wagonSignature =
+        v.network === 'RAIL'
+          ? hasWagonObjs
+            ? vc.wagons!
+                .slice(0, wagonCount)
+                .map((w) => w.cargoType)
+                .join(',')
+            : hasWagonTypes
+              ? vc.wt!.slice(0, wagonCount).join(',')
+              : `${v.cargoType}x${wagonCount}`
+          : v.cargoType;
 
       let inst = this.instances.get(v.id);
       if (
@@ -586,12 +620,19 @@ export class VehicleRenderer {
         inst.modelId !== v.modelId ||
         inst.cargoType !== v.cargoType ||
         inst.wagonCount !== wagonCount ||
+        inst.wagonSignature !== wagonSignature ||
         inst.ownerColor !== ownerColor
       ) {
         if (inst) {
           this.group.remove(inst.rootGroup);
         }
-        inst = this.createVehicleInstance(v, ownerColor, wagonCount, nowPerfMs);
+        inst = this.createVehicleInstance(
+          vc,
+          ownerColor,
+          wagonCount,
+          wagonSignature,
+          nowPerfMs
+        );
         this.instances.set(v.id, inst);
         this.group.add(inst.rootGroup);
       }
@@ -602,12 +643,12 @@ export class VehicleRenderer {
       }
       inst.rootGroup.visible = true;
 
-      // Dynamic OpenTTD empty-vs-loaded cargo fill visualization
-      const fillRatio = Math.max(
+      // Dynamic OpenTTD empty-vs-loaded cargo fill visualization (per-wagon on trains!)
+      const defaultFillRatio = Math.max(
         0,
         Math.min(1, v.cargoAmount / Math.max(1, v.capacity))
       );
-      this.applyCargoFillState(inst, fillRatio);
+      this.applyCargoFillState(inst, vc, defaultFillRatio);
 
       // Status beacon above loading, signal-waiting, or stopped vehicles
       if (v.state === 'WAITING_SIGNAL') {
@@ -756,9 +797,24 @@ export class VehicleRenderer {
     }
   }
 
-  private applyCargoFillState(inst: VehicleVisualInstance, fillRatio: number): void {
+  private applyCargoFillState(
+    inst: VehicleVisualInstance,
+    vc: VehicleConsistCompat,
+    defaultFillRatio: number
+  ): void {
     for (let s = 0; s < inst.cargoSlots.length; s++) {
       const slot = inst.cargoSlots[s];
+      let fillRatio = defaultFillRatio;
+      if (slot.wagonIndex !== undefined) {
+        const wagon = vc.wagons?.[slot.wagonIndex];
+        if (wagon) {
+          fillRatio = Math.max(
+            0,
+            Math.min(1, wagon.cargoAmount / Math.max(1, wagon.capacity))
+          );
+        }
+      }
+
       if (slot.kind === 'HEAP') {
         if (fillRatio <= 0.015) {
           slot.group.visible = false;
@@ -780,9 +836,10 @@ export class VehicleRenderer {
   }
 
   private createVehicleInstance(
-    v: Vehicle,
+    v: VehicleConsistCompat,
     ownerColor: string,
     wagonCount: number,
+    wagonSignature: string,
     nowPerfMs: number
   ): VehicleVisualInstance {
     const rootGroup = new THREE.Group();
@@ -831,7 +888,9 @@ export class VehicleRenderer {
     const wagonGroups: THREE.Group[] = [];
     for (let w = 0; w < wagonCount; w++) {
       const wg = new THREE.Group();
-      this.buildWagonMesh(wg, v.cargoType, ownerColor, w, cargoSlots);
+      const wCargo = v.wagons?.[w]?.cargoType ?? v.wt?.[w] ?? v.cargoType;
+      wg.userData = { wagonIndex: w, cargoType: wCargo };
+      this.buildWagonMesh(wg, wCargo, ownerColor, w, cargoSlots);
       rootGroup.add(wg);
       wagonGroups.push(wg);
     }
@@ -867,6 +926,7 @@ export class VehicleRenderer {
       modelId: v.modelId,
       cargoType: v.cargoType,
       wagonCount,
+      wagonSignature,
       ownerColor,
       rootGroup,
       headMeshGroup,
@@ -1756,7 +1816,7 @@ export class VehicleRenderer {
         this.addSphere(coalHeap, 0.095, 0.058, 0.092, 0, 0.098, 0.01, '#09090b');
         this.addSphere(coalHeap, 0.09, 0.05, 0.085, 0, 0.094, 0.1, '#27272a');
         wg.add(coalHeap);
-        cargoSlots.push({ kind: 'HEAP', group: coalHeap });
+        cargoSlots.push({ kind: 'HEAP', group: coalHeap, wagonIndex: wagonIdx });
         break;
       }
 
@@ -1799,7 +1859,7 @@ export class VehicleRenderer {
         this.addSphere(grainHeap, 0.078, 0.044, 0.095, 0, 0.095, 0.0, '#fde047');
         this.addSphere(grainHeap, 0.075, 0.04, 0.09, 0, 0.092, 0.085, '#facc15');
         wg.add(grainHeap);
-        cargoSlots.push({ kind: 'HEAP', group: grainHeap });
+        cargoSlots.push({ kind: 'HEAP', group: grainHeap, wagonIndex: wagonIdx });
         break;
       }
 
@@ -1870,7 +1930,7 @@ export class VehicleRenderer {
           items.push({ obj: log, threshold: 0.74 + i * 0.14 });
         }
 
-        cargoSlots.push({ kind: 'TIERED', items });
+        cargoSlots.push({ kind: 'TIERED', items, wagonIndex: wagonIdx });
         break;
       }
 
@@ -1918,7 +1978,7 @@ export class VehicleRenderer {
           items.push({ obj: cGroup, threshold: spec.threshold });
         }
 
-        cargoSlots.push({ kind: 'TIERED', items });
+        cargoSlots.push({ kind: 'TIERED', items, wagonIndex: wagonIdx });
         break;
       }
 

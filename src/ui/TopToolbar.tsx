@@ -27,6 +27,7 @@ export type WindowId =
   | 'directory'
   | 'vehicles'
   | 'depot'
+  | 'vehicle_detail'
   | 'company_finances'
   | 'personal_finances'
   | 'hq'
