@@ -9,6 +9,7 @@ import {
   Route,
   Bus,
   Package,
+  Waves,
 } from 'lucide-react';
 import type { ToolType } from '../types/game';
 import { BUILD_COSTS } from '../core';
@@ -66,6 +67,30 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
               <span>Jernbanespor (Klikk & dra)</span>
             </span>
             <span className="text-amber-200 ttd-num">{formatKr(BUILD_COSTS.RAIL)}/rute</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              onSelectTool(activeTool === 'RAIL_BRIDGE' ? 'SELECT' : 'RAIL_BRIDGE')
+            }
+            className={`ttd-btn !justify-between !py-1.5 ${
+              activeTool === 'RAIL_BRIDGE' ? 'ttd-btn-active' : ''
+            }`}
+            title="Dra rett over vann fra bredd til bredd"
+          >
+            <span className="flex items-center gap-2">
+              <Waves className="w-4 h-4 text-cyan-300" />
+              <span className="text-left">
+                <span className="block">Jernbanebru</span>
+                <span className="block text-[9px] font-normal text-slate-300">
+                  Dra rett over vann fra bredd til bredd
+                </span>
+              </span>
+            </span>
+            <span className="text-amber-200 ttd-num">
+              {formatKr((BUILD_COSTS as Record<string, number>).RAIL_BRIDGE ?? 18_000)}/rute
+            </span>
           </button>
 
           <button
@@ -194,6 +219,30 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
             <span>Bilvei (Klikk & dra)</span>
           </span>
           <span className="text-amber-200 ttd-num">{formatKr(BUILD_COSTS.ROAD)}/rute</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() =>
+            onSelectTool(activeTool === 'ROAD_BRIDGE' ? 'SELECT' : 'ROAD_BRIDGE')
+          }
+          className={`ttd-btn !justify-between !py-1.5 ${
+            activeTool === 'ROAD_BRIDGE' ? 'ttd-btn-active' : ''
+          }`}
+          title="Dra rett over vann fra bredd til bredd"
+        >
+          <span className="flex items-center gap-2">
+            <Waves className="w-4 h-4 text-cyan-300" />
+            <span className="text-left">
+              <span className="block">Veibru</span>
+              <span className="block text-[9px] font-normal text-slate-300">
+                Dra rett over vann fra bredd til bredd
+              </span>
+            </span>
+          </span>
+          <span className="text-amber-200 ttd-num">
+            {formatKr((BUILD_COSTS as Record<string, number>).ROAD_BRIDGE ?? 12_000)}/rute
+          </span>
         </button>
 
         <button

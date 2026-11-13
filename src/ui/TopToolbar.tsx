@@ -45,6 +45,8 @@ export interface TopToolbarProps {
   playerVehicleCount: number;
   hqTier: number;
   connectedPin: string | null;
+  assignedWorldIndex?: number | null;
+  isTeacherAdmin?: boolean;
   classroomRemainingSec: number | null;
   isBankruptWarning: boolean;
   onSetSpeed: (speed: GameSpeed) => void;
@@ -71,6 +73,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   playerVehicleCount,
   hqTier,
   connectedPin,
+  assignedWorldIndex = null,
+  isTeacherAdmin = false,
   classroomRemainingSec,
   isBankruptWarning,
   onSetSpeed,
@@ -83,12 +87,14 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 }) => {
   const isRailTool =
     activeTool === 'RAIL' ||
+    activeTool === 'RAIL_BRIDGE' ||
     activeTool === 'RAIL_DEPOT' ||
     activeTool === 'TRAIN_STATION' ||
     activeTool === 'SIGNAL';
 
   const isRoadTool =
     activeTool === 'ROAD' ||
+    activeTool === 'ROAD_BRIDGE' ||
     activeTool === 'ROAD_DEPOT' ||
     activeTool === 'BUS_STOP' ||
     activeTool === 'TRUCK_BAY';
@@ -346,9 +352,13 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         <button
           type="button"
           onClick={() => onToggleWindow('classroom')}
-          title="Lærer / Klasserom – Live PIN-økt og ledertavle"
+          title="Lærer / Klasserom – Live PIN-økt, verdener og ledertavle"
           className={`ttd-btn ${
-            connectedPin ? 'ttd-btn-green' : 'ttd-btn-teal'
+            connectedPin
+              ? 'ttd-btn-green'
+              : isTeacherAdmin
+              ? 'ttd-btn-brass'
+              : 'ttd-btn-teal'
           } !px-2 !h-[26px] ${
             openWindows.has('classroom') ? 'ttd-btn-active' : ''
           }`}
@@ -357,13 +367,18 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           {connectedPin ? (
             <span className="flex items-center gap-1 ttd-num">
               <span className="w-1.5 h-1.5 bg-amber-300 animate-pulse" />
-              <span>PIN {connectedPin}</span>
+              <span>
+                PIN {connectedPin}
+                {assignedWorldIndex ? ` • Verden #${assignedWorldIndex}` : ''}
+              </span>
               {classroomRemainingSec !== null && (
                 <span className="bg-black/45 px-1 text-[10px] text-amber-200">
                   {formatCountdown(classroomRemainingSec)}
                 </span>
               )}
             </span>
+          ) : isTeacherAdmin ? (
+            <span>Lærer-modus</span>
           ) : (
             <span>Klasserom</span>
           )}

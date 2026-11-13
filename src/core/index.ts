@@ -1,7 +1,9 @@
 export {
   GameEngine,
   createGameEngine,
+  resolveWorldSetup,
   type ApplyToolOptions,
+  type DragTrackTool,
   type GameEngineOptions,
 } from './engine';
 
@@ -10,6 +12,8 @@ export {
   CARGO_LABELS_NO,
   INDUSTRY_LABELS_NO,
   COMPANY_COLORS,
+  MULTIPLAYER_PLAYER_COLORS,
+  DEFAULT_WORLD_SETUP,
   BUILD_COSTS,
   VEHICLE_CATALOG,
   VEHICLE_CATALOG_LIST,
@@ -56,6 +60,7 @@ export {
 export {
   NORWEGIAN_TOWN_NAMES,
   generateWorld,
+  generateWorldMap,
   tileIndex,
   inBounds,
 } from './mapGenerator';
@@ -64,6 +69,7 @@ export {
   computeDragLineTiles,
   findNetworkPath,
   isTileTraversableForNetwork,
+  getEffectiveTrackElevation,
 } from './pathfinder';
 
 export {
@@ -78,6 +84,11 @@ export type {
   GameSpeed,
   VehicleModelId,
   ScenarioType,
+  MapSizeOption,
+  WorldTerrainType,
+  WaterLevelType,
+  DensityType,
+  WorldSetupConfig,
   DemoRouteType,
   TerrainType,
   Tile,
@@ -101,5 +112,8 @@ export type {
   BuyVehicleParams,
   TileInspectionInfo,
   StationDetailsInfo,
+  ModifiedTileDelta,
+  RemotePlayerWorldSlice,
+  LocalPlayerIdentity,
   GameState,
 } from '../types/game';

@@ -15,16 +15,19 @@ import {
 } from '../src/formulas';
 import {
   ALL_CARGO_TYPES,
+  BUILD_COSTS,
   GameEngine,
   HQ_TIERS,
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
   LOAN_STEP_KR,
+  NORWEGIAN_TOWN_NAMES,
   RAIL_STATION_CATCHMENT_RADIUS,
   ROAD_STATION_CATCHMENT_RADIUS,
   TOTAL_AI_SHARES,
   VEHICLE_CATALOG,
   createGameEngine,
+  findNetworkPath,
   getStationHQBonusPct,
   getStationSuppliedCargos,
   isCargoCompatibleWithStationKind,
@@ -32,22 +35,41 @@ import {
   tileIndex,
 } from '../src/core';
 import {
+  BRIDGE_DECK_Y,
   WATER_SURFACE_Y,
   getCornerHeight,
   getSurfaceHeightAt,
   getTileCornerHeights,
+  getTravelSurfaceHeightAt,
+  resolveOwnerColor,
 } from '../src/renderer/IsoSceneManager';
 import { TerrainInstancer } from '../src/renderer/TerrainInstancer';
 import { StructuresRenderer } from '../src/renderer/StructuresRenderer';
 import { VehicleRenderer } from '../src/renderer/VehicleRenderer';
 import { firebaseConfig, hasValidFirebaseConfig } from '../src/firebase/config';
 import {
+  ADMIN_TEACHER_EMAIL,
+  getCurrentTeacherUser,
+  signInTeacherWithGoogle,
+  signOutTeacher,
+  subscribeToTeacherAuth,
+} from '../src/firebase/auth';
+import {
+  DEFAULT_WORLD_SETUP,
+  PLAYER_WORLD_COLORS,
+  computeWorldBucketAssignment,
   createClassroomSession,
   isFirebaseConfigured,
   joinClassroomSession,
+  joinClassroomWithWorldAssignment,
+  normalizeWorldSetup,
   pushStudentTelemetry,
   subscribeToClassroom,
 } from '../src/firebase/classroom';
+import {
+  publishPlayerWorldSlice,
+  subscribeToWorldPeers,
+} from '../src/firebase/multiplayer';
 
 let passedAssertions = 0;
 
@@ -69,12 +91,27 @@ function assertEq<T>(actual: T, expected: T, message: string): void {
   passedAssertions++;
 }
 
+function assertNear(
+  actual: number,
+  expected: number,
+  tolerance: number,
+  message: string
+): void {
+  if (Math.abs(actual - expected) > tolerance) {
+    console.error(
+      `\n[FAIL] ${message}\n  Expected: ${expected} (±${tolerance})\n  Actual:   ${actual}`
+    );
+    process.exit(1);
+  }
+  passedAssertions++;
+}
+
 function section(title: string): void {
   console.log(`\n=== ${title} ===`);
 }
 
 async function main(): Promise<void> {
-  console.log('Starting Transport Tycoon: Classroom Edition Headless Verification (Round 2 TTD Edition)...');
+  console.log('Starting Transport Tycoon: Classroom Edition Headless Verification (Round 5 Multiplayer & Bridges Edition)...');
 
   // =========================================================================
   // 1. OpenTTD Cargo Payment, Recalibrated Commodity Rates & Mechanics Formulas
@@ -1184,6 +1221,521 @@ async function main(): Promise<void> {
 
   console.log(
     `  [OK] Verified getStationSuppliedCargos, 0-rating cleanup & getStationDetails across player + ${aiStations.length} rival AI stations.`
+  );
+
+  // =========================================================================
+  // 10. Round 5 Bridges, Large Maps (128/160), WorldSetup, Multiplayer & Auth QA
+  // =========================================================================
+  section('10. Round 5 Bridges, Large Maps (128/160), WorldSetup, Multiplayer & Auth QA');
+
+  // 10a. Bridge build costs, ROAD_BRIDGE, RAIL_BRIDGE, auto-bridge on straight drag,
+  //      getTravelSurfaceHeightAt, bulldoze revert, and cargo delivery across a water bridge
+  assertEq(BUILD_COSTS.ROAD_BRIDGE, 12_000, 'BUILD_COSTS.ROAD_BRIDGE === 12 000 kr');
+  assertEq(BUILD_COSTS.RAIL_BRIDGE, 18_000, 'BUILD_COSTS.RAIL_BRIDGE === 18 000 kr');
+  assert(
+    BUILD_COSTS.ROAD_BRIDGE > BUILD_COSTS.ROAD,
+    'ROAD_BRIDGE is more expensive than normal ROAD'
+  );
+  assert(
+    BUILD_COSTS.RAIL_BRIDGE > BUILD_COSTS.RAIL,
+    'RAIL_BRIDGE is more expensive than normal RAIL'
+  );
+
+  const bridgeEngine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260501,
+    },
+  });
+  bridgeEngine.grantDevFunds('corporate', 5_000_000);
+  const brState = bridgeEngine.getState();
+
+  // Carve a deterministic clear corridor in rows y=20..24, x=18..34 with a 3-tile water channel at x=25..27
+  for (let cy = 19; cy <= 25; cy++) {
+    for (let cx = 16; cx <= 36; cx++) {
+      const t = brState.tiles[tileIndex(cx, cy, brState.mapSize)];
+      t.industryId = undefined;
+      t.townId = undefined;
+      t.buildingTier = undefined;
+      t.stationId = undefined;
+      t.depot = null;
+      t.hqOwnerId = null;
+      t.ownerId = null;
+      t.road = false;
+      t.rail = false;
+      t.signal = false;
+      t.bridge = null;
+      t.bridgeAxis = undefined;
+      if (cx >= 25 && cx <= 27) {
+        t.terrain = 'WATER';
+        t.elevation = 0;
+      } else {
+        t.terrain = 'GRASS';
+        t.elevation = 1;
+      }
+    }
+  }
+
+  // Test explicit ROAD_BRIDGE drag from shore x=24 to shore x=28 at y=20 (3 water tiles + 2 shore tiles)
+  const roadBridgePreview = bridgeEngine.previewDragPath(24, 20, 28, 20, 'ROAD_BRIDGE');
+  assertEq(
+    roadBridgePreview.tiles.length,
+    5,
+    'ROAD_BRIDGE preview spans 3 water tiles + 2 shore approach tiles'
+  );
+  assertEq(
+    roadBridgePreview.cost,
+    3 * BUILD_COSTS.ROAD_BRIDGE + 2 * BUILD_COSTS.ROAD,
+    'ROAD_BRIDGE preview cost equals 3 * 12 000 + 2 * 2 500 = 41 000 kr'
+  );
+
+  const cashBeforeRoadBridge = bridgeEngine.getState().corporate.cash;
+  const buildRoadBridgeRes = bridgeEngine.applyDragTrackOrRoad(24, 20, 28, 20, 'ROAD_BRIDGE');
+  assert(buildRoadBridgeRes.ok, `Explicit ROAD_BRIDGE succeeded: ${buildRoadBridgeRes.message}`);
+  assertEq(
+    cashBeforeRoadBridge - bridgeEngine.getState().corporate.cash,
+    41_000,
+    'Explicit ROAD_BRIDGE deducted exact 41 000 kr from corporate cash'
+  );
+
+  for (const wx of [25, 26, 27]) {
+    const wt = bridgeEngine.getState().tiles[tileIndex(wx, 20, 64)];
+    assertEq(wt.terrain, 'WATER', `Road bridge tile (${wx},20) stays WATER underneath`);
+    assertEq(wt.bridge, 'ROAD', `Road bridge tile (${wx},20) sets bridge === 'ROAD'`);
+    assertEq(wt.bridgeAxis, 'X', `Road bridge tile (${wx},20) sets bridgeAxis === 'X'`);
+    assert(wt.road === true && !wt.rail, `Road bridge tile (${wx},20) enables road only`);
+    assertNear(
+      getTravelSurfaceHeightAt(bridgeEngine.getState(), wx, 20),
+      BRIDGE_DECK_Y,
+      1e-5,
+      `getTravelSurfaceHeightAt on road bridge tile (${wx},20) equals BRIDGE_DECK_Y`
+    );
+  }
+  assert(
+    BRIDGE_DECK_Y > WATER_SURFACE_Y + 0.15,
+    `BRIDGE_DECK_Y (${BRIDGE_DECK_Y.toFixed(3)}) is elevated well above WATER_SURFACE_Y (${WATER_SURFACE_Y})`
+  );
+
+  // Verify shore abutment ramp interpolates smoothly toward BRIDGE_DECK_Y on shore tile (24, 20)
+  const shoreCenterY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24, 20);
+  const shoreMidRampY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24.25, 20);
+  const shoreEdgeY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24.49, 20);
+  assert(
+    shoreMidRampY > shoreCenterY && shoreEdgeY > shoreMidRampY,
+    `Shore abutment ramp rises smoothly from ${shoreCenterY.toFixed(3)} -> ${shoreMidRampY.toFixed(3)} -> ${shoreEdgeY.toFixed(3)}`
+  );
+  assertNear(
+    shoreEdgeY,
+    BRIDGE_DECK_Y,
+    0.02,
+    'Shore abutment ramp reaches BRIDGE_DECK_Y at water edge'
+  );
+
+  // Verify bulldozing water bridge tiles cleanly reverts to plain WATER
+  for (const wx of [25, 26, 27]) {
+    const bullRes = bridgeEngine.applyTool(wx, 20, 'BULLDOZE');
+    assert(bullRes.ok, `BULLDOZE removed road bridge tile (${wx},20)`);
+    const reverted = bridgeEngine.getState().tiles[tileIndex(wx, 20, 64)];
+    assertEq(reverted.terrain, 'WATER', `Bulldozed bridge tile (${wx},20) reverted to WATER`);
+    assert(!reverted.bridge, `Bulldozed bridge tile (${wx},20) cleared tile.bridge`);
+    assert(!reverted.road && !reverted.rail, `Bulldozed bridge tile (${wx},20) cleared road/rail`);
+  }
+
+  // Test explicit RAIL_BRIDGE on row y=21 AND auto-bridge via straight RAIL drag on row y=22!
+  const explicitRailBridgeRes = bridgeEngine.applyDragTrackOrRoad(24, 21, 28, 21, 'RAIL_BRIDGE');
+  assert(explicitRailBridgeRes.ok, `Explicit RAIL_BRIDGE succeeded: ${explicitRailBridgeRes.message}`);
+  assertEq(
+    explicitRailBridgeRes.cost,
+    3 * BUILD_COSTS.RAIL_BRIDGE + 2 * BUILD_COSTS.RAIL,
+    'Explicit RAIL_BRIDGE cost === 3 * 18 000 + 2 * 4 500 = 63 000 kr'
+  );
+
+  // Auto-bridge: dragging plain 'RAIL' straight from (20,22) on west bank to (32,22) on east bank across water x=25..27!
+  const autoRailBridgeRes = bridgeEngine.applyDragTrackOrRoad(20, 22, 32, 22, 'RAIL');
+  assert(autoRailBridgeRes.ok, `Auto-bridge straight RAIL drag succeeded: ${autoRailBridgeRes.message}`);
+  for (const wx of [25, 26, 27]) {
+    const rbt = bridgeEngine.getState().tiles[tileIndex(wx, 22, 64)];
+    assertEq(rbt.bridge, 'RAIL', `Auto-bridge tile (${wx},22) set bridge === 'RAIL'`);
+    assertEq(rbt.bridgeAxis, 'X', `Auto-bridge tile (${wx},22) set bridgeAxis === 'X'`);
+    assert(rbt.rail === true && !rbt.road, `Auto-bridge tile (${wx},22) has rail === true`);
+  }
+
+  // Verify signals and stations are forbidden on water bridge tiles, and 90-degree turns mid-water are blocked
+  const sigOnBridgeRes = bridgeEngine.applyTool(26, 22, 'SIGNAL');
+  assert(!sigOnBridgeRes.ok, 'Placing SIGNAL on a water bridge tile is properly rejected');
+  const stOnBridgeRes = bridgeEngine.applyTool(26, 22, 'TRAIN_STATION');
+  assert(!stOnBridgeRes.ok, 'Placing TRAIN_STATION on a water bridge tile is properly rejected');
+  // Mid-bridge 90-degree jump from row 21 bridge (26,21) directly to row 22 bridge (26,22) must NOT occur:
+  // Any route from (26,21) to (26,22) must exit to dry shore first (length >= 5), never a 1-step Y jump!
+  const midBridgeDetour = findNetworkPath(
+    bridgeEngine.getState().tiles,
+    64,
+    26,
+    21,
+    [{ x: 26, y: 22 }],
+    'RAIL'
+  );
+  assert(
+    midBridgeDetour.length >= 5 && !(midBridgeDetour[0].x === 26 && midBridgeDetour[0].y === 22),
+    'Pathfinder forbids 90-degree turns between adjacent parallel bridges in mid-water'
+  );
+
+  // End-to-end train pathfinding & cargo delivery across the water rail bridge at y=22!
+  // Place synthetic town/industry anchors on west shore (x=19,y=21) and east shore (x=33,y=21)
+  const westTown = bridgeEngine.getState().towns[0];
+  const eastTown = bridgeEngine.getState().towns[1];
+  assert(Boolean(westTown && eastTown), 'Bridge test engine has at least 2 towns');
+  bridgeEngine.getState().tiles[tileIndex(19, 21, 64)].townId = westTown.id;
+  bridgeEngine.getState().tiles[tileIndex(19, 21, 64)].buildingTier = 2;
+  bridgeEngine.getState().tiles[tileIndex(33, 21, 64)].townId = eastTown.id;
+  bridgeEngine.getState().tiles[tileIndex(33, 21, 64)].buildingTier = 2;
+
+  const westStRes = bridgeEngine.applyTool(19, 22, 'TRAIN_STATION', {
+    stationLength: 1,
+    orientation: 'X',
+  });
+  const eastStRes = bridgeEngine.applyTool(33, 22, 'TRAIN_STATION', {
+    stationLength: 1,
+    orientation: 'X',
+  });
+  const bridgeDepotRes = bridgeEngine.applyTool(20, 23, 'RAIL_DEPOT');
+  assert(
+    westStRes.ok && eastStRes.ok && bridgeDepotRes.ok,
+    'Built west & east train stations + rail depot linked only by the water bridge'
+  );
+
+  const bridgePathCheck = findNetworkPath(
+    bridgeEngine.getState().tiles,
+    64,
+    19,
+    22,
+    [{ x: 33, y: 22 }],
+    'RAIL'
+  );
+  assert(
+    bridgePathCheck.length > 0 && bridgePathCheck.some((pt) => pt.x === 26 && pt.y === 22),
+    'A* rail pathfinder routes across water bridge tile (26,22)'
+  );
+
+  // Seed waiting passengers at west station so train loads and delivers across the fjord bridge
+  const westStationObj = bridgeEngine
+    .getState()
+    .stations.find((s) => s.id === westStRes.stationId)!;
+  westStationObj.waitingCargo.PASSENGERS = 60;
+
+  const buyBridgeTrain = bridgeEngine.buyVehicle({
+    depotX: 20,
+    depotY: 23,
+    modelId: 'LOCO_DIESEL',
+    cargoType: 'PASSENGERS',
+    wagonCount: 2,
+    orders: [westStRes.stationId!, eastStRes.stationId!],
+  });
+  assert(buyBridgeTrain.ok && Boolean(buyBridgeTrain.vehicleId), 'Purchased train for bridge crossing test');
+
+  const bridgeVehRenderer = new VehicleRenderer();
+  let trainCrossedWaterBridge = false;
+  let maxBridgeVehicleMeshY = 0;
+
+  for (let sub = 0; sub < 60 * 14; sub++) {
+    bridgeEngine.tick(1);
+    const curState = bridgeEngine.getState();
+    const tr = curState.vehicles.find((v) => v.id === buyBridgeTrain.vehicleId)!;
+    const curTileX = Math.round(tr.x + (tr.nextX - tr.x) * tr.progress);
+    const curTileY = Math.round(tr.y + (tr.nextY - tr.y) * tr.progress);
+    if (curTileX >= 25 && curTileX <= 27 && curTileY === 22) {
+      trainCrossedWaterBridge = true;
+      bridgeVehRenderer.update(curState, 0.016, sub * 50);
+      for (const vehRoot of bridgeVehRenderer.group.children) {
+        for (const subPart of vehRoot.children) {
+          if (subPart.position.x >= 24.5 && subPart.position.x <= 27.5 && subPart.position.y > maxBridgeVehicleMeshY) {
+            maxBridgeVehicleMeshY = subPart.position.y;
+          }
+        }
+      }
+    }
+  }
+  bridgeVehRenderer.dispose();
+
+  assert(trainCrossedWaterBridge, 'Train physically traversed water bridge tiles (25..27, 22)');
+  assert(
+    maxBridgeVehicleMeshY >= BRIDGE_DECK_Y,
+    `VehicleRenderer posed train elevated on bridge deck (y=${maxBridgeVehicleMeshY.toFixed(3)} >= BRIDGE_DECK_Y=${BRIDGE_DECK_Y.toFixed(3)})`
+  );
+  assert(
+    bridgeEngine.getState().corporate.currentYearPnL.freightRevenue > 0,
+    `Train delivered passengers across water bridge and earned freight revenue (${bridgeEngine.getState().corporate.currentYearPnL.freightRevenue} kr)`
+  );
+
+  // 10b. Large maps (128x128 & 160x160), terrainType, waterLevel, aiEnabled: false, and Multiplayer sync
+  assert(
+    NORWEGIAN_TOWN_NAMES.length >= 24,
+    `NORWEGIAN_TOWN_NAMES expanded to >= 24 cities (${NORWEGIAN_TOWN_NAMES.length})`
+  );
+
+  const map128Engine = new GameEngine({
+    worldSetup: {
+      mapSize: 128,
+      terrainType: 'flat',
+      waterLevel: 'very_low',
+      townDensity: 'normal',
+      industryDensity: 'normal',
+      startYear: 1980,
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20261280,
+    },
+  });
+  const s128 = map128Engine.getState();
+  assertEq(s128.mapSize, 128, '128x128 world has mapSize === 128');
+  assertEq(s128.tiles.length, 128 * 128, '128x128 world has 16,384 tiles');
+  assertEq(s128.date.calendarYear, 1980, 'startYear 1980 sets date.calendarYear === 1980');
+
+  const map160Engine = new GameEngine({
+    worldSetup: {
+      mapSize: 160,
+      terrainType: 'mountainous',
+      waterLevel: 'high',
+      townDensity: 'high',
+      industryDensity: 'high',
+      startYear: 2000,
+      aiEnabled: true,
+      maxAiCount: 2,
+      seed: 20261600,
+    },
+  });
+  const s160 = map160Engine.getState();
+  assertEq(s160.mapSize, 160, '160x160 world has mapSize === 160');
+  assertEq(s160.tiles.length, 160 * 160, '160x160 world has 25,600 tiles');
+  assert(
+    s160.towns.length > s128.towns.length && s160.towns.length >= 16,
+    `160x160 high-density world scales up towns (${s160.towns.length} towns)`
+  );
+  assert(
+    s160.industries.length >= 18,
+    `160x160 high-density world scales up industries (${s160.industries.length} industries)`
+  );
+
+  const maxElevFlat = s128.tiles.reduce((m, t) => Math.max(m, t.elevation), 0);
+  const maxElevMountainous = s160.tiles.reduce((m, t) => Math.max(m, t.elevation), 0);
+  assert(
+    maxElevMountainous > maxElevFlat,
+    `Mountainous terrain max elevation (${maxElevMountainous}) > flat terrain max elevation (${maxElevFlat})`
+  );
+
+  const waterPctVeryLow =
+    s128.tiles.filter((t) => t.terrain === 'WATER').length / s128.tiles.length;
+  const waterPctHigh =
+    s160.tiles.filter((t) => t.terrain === 'WATER').length / s160.tiles.length;
+  assert(
+    waterPctHigh > waterPctVeryLow,
+    `High waterLevel ratio (${(waterPctHigh * 100).toFixed(1)}%) > very_low ratio (${(waterPctVeryLow * 100).toFixed(1)}%)`
+  );
+
+  // Verify TerrainInstancer handles 160x160 map without buffer overflow
+  const largeTerrainInstancer = new TerrainInstancer();
+  largeTerrainInstancer.sync(s160);
+  assert(
+    largeTerrainInstancer.group.children.length > 0,
+    'TerrainInstancer synced 160x160 map (25,600 tiles) cleanly'
+  );
+  largeTerrainInstancer.dispose();
+
+  // Verify aiEnabled: false spawns ZERO AI competitors even after 38 months!
+  const noAiEngine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20269999,
+    },
+  });
+  noAiEngine.fastForwardMonths(38);
+  assertEq(
+    noAiEngine.getState().aiCompanies.length,
+    0,
+    'aiEnabled: false keeps 0 AI companies even after 38 game months'
+  );
+
+  // Verify maxAiCount: 1 caps AI spawns at 1 company even past Month 36
+  const oneAiEngine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      aiEnabled: true,
+      maxAiCount: 1,
+      seed: 20269998,
+    },
+  });
+  oneAiEngine.fastForwardMonths(37);
+  assertEq(
+    oneAiEngine.getState().aiCompanies.length,
+    1,
+    'maxAiCount: 1 spawns exactly 1 AI company after 37 months'
+  );
+
+  // Verify Multiplayer Shared-World Peer Sync (setLocalPlayerIdentity, exportMultiplayerSlice, syncMultiplayerPeers)
+  const sharedMpSetup = {
+    mapSize: 64 as const,
+    gameMode: 'multiplayer' as const,
+    playersPerWorld: 3,
+    aiEnabled: false,
+    maxAiCount: 0 as const,
+    seed: 20267777,
+  };
+  const peerA = new GameEngine({ worldSetup: sharedMpSetup });
+  const peerB = new GameEngine({ worldSetup: sharedMpSetup });
+
+  peerA.setLocalPlayerIdentity({
+    clientId: 'stu-alpha',
+    ownerName: 'Nora',
+    companyName: 'Nordlys Bane AS',
+    playerColor: '#16a34a',
+  });
+  peerB.setLocalPlayerIdentity({
+    clientId: 'stu-beta',
+    ownerName: 'Henrik',
+    companyName: 'Vestkyst Frakt AS',
+    playerColor: '#ea580c',
+  });
+
+  peerA.grantDevFunds('personal', 500_000);
+  peerA.upgradeHQ();
+  const peerARoute = peerA.spawnDemoRoute('bus_line');
+  assert(peerARoute.ok, 'Peer A built bus_line demo route in shared world');
+
+  const sliceA = peerA.exportMultiplayerSlice();
+  assertEq(sliceA.clientId, 'stu-alpha', 'Exported slice carries Peer A clientId');
+  assertEq(sliceA.companyName, 'Nordlys Bane AS', 'Exported slice carries Peer A companyName');
+  assertEq(sliceA.color, '#16a34a', 'Exported slice carries Peer A color');
+  assert(
+    sliceA.stations.length >= 2 &&
+      sliceA.stations.every((s) => s.id.includes('stu-alpha')),
+    'Peer A stations use collision-free client-scoped IDs'
+  );
+  assert(
+    sliceA.vehicles.length >= 1 &&
+      sliceA.vehicles.every((v) => v.id.includes('stu-alpha')),
+    'Peer A vehicles use collision-free client-scoped IDs'
+  );
+  assert(sliceA.modifiedTiles.length > 0, 'Exported slice includes Peer A modified road/HQ tiles');
+
+  peerB.syncMultiplayerPeers([sliceA]);
+  const peerBStateAfterSync = peerB.getState();
+  assert(
+    peerBStateAfterSync.stations.some((s) => s.id === sliceA.stations[0].id && s.ownerId === 'stu-alpha'),
+    'Peer B state contains synced Peer A station with ownerId === stu-alpha'
+  );
+  assert(
+    peerBStateAfterSync.vehicles.some((v) => v.id === sliceA.vehicles[0].id && v.ownerId === 'stu-alpha'),
+    'Peer B state contains synced Peer A vehicle with ownerId === stu-alpha'
+  );
+  const syncedStationDetails = peerB.getStationDetails(sliceA.stations[0].id);
+  assert(syncedStationDetails !== null, 'Peer B can inspect Peer A station via getStationDetails');
+  assertEq(syncedStationDetails.isPlayerOwned, false, 'Synced Peer A station isPlayerOwned === false on Peer B');
+  assertEq(
+    syncedStationDetails.ownerName,
+    'Nordlys Bane AS',
+    'Peer B resolves Peer A companyName on synced station'
+  );
+  assertEq(
+    syncedStationDetails.ownerColor,
+    '#16a34a',
+    'Peer B resolves Peer A color on synced station'
+  );
+  assertEq(
+    resolveOwnerColor('stu-alpha', peerBStateAfterSync.aiCompanies, peerBStateAfterSync),
+    '#16a34a',
+    'Renderer resolveOwnerColor resolves multiplayer peer color #16a34a'
+  );
+
+  // Syncing empty peers list cleanly removes Peer A stations/vehicles/tiles on Peer B
+  peerB.syncMultiplayerPeers([]);
+  assert(
+    !peerB.getState().stations.some((s) => s.ownerId === 'stu-alpha') &&
+      !peerB.getState().vehicles.some((v) => v.ownerId === 'stu-alpha'),
+    'syncMultiplayerPeers([]) cleanly removes stale remote peer stations & vehicles'
+  );
+
+  // 10c. World Bucket Math (playersPerWorld = 3) & Firebase Auth / Classroom / Multiplayer Exports
+  const mpBucketSetup = { gameMode: 'multiplayer' as const, playersPerWorld: 3 };
+  const expectedBuckets = [
+    { slot: 0, worldIndex: 1, slotInWorld: 1, color: PLAYER_WORLD_COLORS[0] },
+    { slot: 1, worldIndex: 1, slotInWorld: 2, color: PLAYER_WORLD_COLORS[1] },
+    { slot: 2, worldIndex: 1, slotInWorld: 3, color: PLAYER_WORLD_COLORS[2] },
+    { slot: 3, worldIndex: 2, slotInWorld: 1, color: PLAYER_WORLD_COLORS[0] },
+    { slot: 4, worldIndex: 2, slotInWorld: 2, color: PLAYER_WORLD_COLORS[1] },
+    { slot: 5, worldIndex: 2, slotInWorld: 3, color: PLAYER_WORLD_COLORS[2] },
+    { slot: 6, worldIndex: 3, slotInWorld: 1, color: PLAYER_WORLD_COLORS[0] },
+  ];
+  for (const exp of expectedBuckets) {
+    const bucket = computeWorldBucketAssignment(exp.slot, mpBucketSetup);
+    assertEq(
+      bucket.worldIndex,
+      exp.worldIndex,
+      `Slot ${exp.slot} (playersPerWorld=3) -> World ${exp.worldIndex}`
+    );
+    assertEq(
+      bucket.slotInWorld,
+      exp.slotInWorld,
+      `Slot ${exp.slot} (playersPerWorld=3) -> slotInWorld ${exp.slotInWorld}`
+    );
+    assertEq(
+      bucket.playerColor,
+      exp.color,
+      `Slot ${exp.slot} (playersPerWorld=3) -> playerColor ${exp.color}`
+    );
+  }
+
+  const spBucket0 = computeWorldBucketAssignment(0, { gameMode: 'singleplayer', playersPerWorld: 1 });
+  const spBucket1 = computeWorldBucketAssignment(1, { gameMode: 'singleplayer', playersPerWorld: 1 });
+  const spBucket2 = computeWorldBucketAssignment(2, { gameMode: 'singleplayer', playersPerWorld: 1 });
+  assert(
+    spBucket0.worldIndex === 1 && spBucket1.worldIndex === 2 && spBucket2.worldIndex === 3,
+    'Singleplayer bucket math puts each student in their own world (1, 2, 3)'
+  );
+
+  const normSetup = normalizeWorldSetup({
+    mapSize: 160,
+    gameMode: 'multiplayer',
+    playersPerWorld: 4,
+    aiEnabled: false,
+    maxAiCount: 3,
+  });
+  assert(
+    normSetup.mapSize === 160 && !normSetup.aiEnabled && normSetup.maxAiCount === 0,
+    'normalizeWorldSetup forces maxAiCount=0 when aiEnabled=false'
+  );
+  assert(Boolean(DEFAULT_WORLD_SETUP.seed), 'DEFAULT_WORLD_SETUP exported with valid seed');
+
+  assertEq(
+    ADMIN_TEACHER_EMAIL,
+    'hanselaa@gmail.com',
+    'ADMIN_TEACHER_EMAIL strictly locked to hanselaa@gmail.com'
+  );
+  assert(typeof signInTeacherWithGoogle === 'function', 'signInTeacherWithGoogle exported');
+  assert(typeof signOutTeacher === 'function', 'signOutTeacher exported');
+  assert(typeof subscribeToTeacherAuth === 'function', 'subscribeToTeacherAuth exported');
+  assert(typeof getCurrentTeacherUser === 'function', 'getCurrentTeacherUser exported');
+  assert(
+    typeof joinClassroomWithWorldAssignment === 'function',
+    'joinClassroomWithWorldAssignment exported'
+  );
+  assert(typeof publishPlayerWorldSlice === 'function', 'publishPlayerWorldSlice exported');
+  assert(typeof subscribeToWorldPeers === 'function', 'subscribeToWorldPeers exported');
+
+  assert(
+    rulesText.includes("request.auth.token.email == 'hanselaa@gmail.com'") &&
+      rulesText.includes('match /worlds/{worldId}') &&
+      rulesText.includes('match /players/{playerId}'),
+    'firestore.rules enforces hanselaa@gmail.com teacher auth and /worlds/{worldId}/players/{playerId} sync rules'
+  );
+
+  console.log(
+    '  [OK] Road/Rail bridges, cargo delivery across bridge, 128/160 maps, AI toggle, multiplayer sync & world bucket/auth rules verified.'
   );
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }

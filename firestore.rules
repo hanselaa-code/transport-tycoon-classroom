@@ -3,67 +3,41 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function isValidPin(pin) {
-      return pin is string && pin.size() == 4 && pin.matches('[0-9]{4}');
+      return pin is string && pin.size() == 4 && pin.matches('^[0-9]{4}$');
     }
 
-    // Classroom session document keyed by 4-digit PIN (zero-login classroom mode)
+    function isAdminTeacher() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email == 'hanselaa@gmail.com';
+    }
+
+    // Classroom session document keyed by 4-digit PIN
     match /classrooms/{pin} {
-      allow get: if isValidPin(pin);
-      allow list: if false;
+      allow read: if true;
 
-      allow create, update: if isValidPin(pin)
-        && request.resource.data.keys().hasAll([
-          'pin',
-          'teacherCreatedAt',
-          'durationMinutes',
-          'endsAt',
-          'scenario',
-          'active'
-        ])
-        && request.resource.data.keys().size() <= 10
-        && request.resource.data.pin == pin
-        && request.resource.data.teacherCreatedAt is number
-        && request.resource.data.durationMinutes is number
-        && request.resource.data.durationMinutes > 0
-        && request.resource.data.durationMinutes <= 480
-        && request.resource.data.endsAt is number
-        && request.resource.data.scenario in ['standard', 'boom', 'challenge']
-        && request.resource.data.active is bool;
+      allow create, delete: if isValidPin(pin) && isAdminTeacher();
 
-      allow delete: if false;
+      allow update: if isValidPin(pin) && (
+        isAdminTeacher()
+        || (
+          request.resource.data.pin == resource.data.pin
+          && request.resource.data.worldSetup == resource.data.worldSetup
+        )
+      );
 
       // Student telemetry documents inside a valid 4-digit PIN session
       match /students/{studentId} {
+        allow read, write: if isValidPin(pin);
+      }
+
+      // Multiplayer world player slices inside a valid 4-digit PIN session
+      match /worlds/{worldId} {
         allow read: if isValidPin(pin);
 
-        allow create, update: if isValidPin(pin)
-          && studentId.size() >= 1
-          && studentId.size() <= 64
-          && request.resource.data.keys().hasAll([
-            'studentId',
-            'studentName',
-            'companyName',
-            'companyValue',
-            'personalNetWorth',
-            'hqTier',
-            'totalTaxPaid',
-            'annualProfit',
-            'updatedAt'
-          ])
-          && request.resource.data.keys().size() <= 15
-          && request.resource.data.studentId == studentId
-          && request.resource.data.studentName is string
-          && request.resource.data.studentName.size() <= 100
-          && request.resource.data.companyName is string
-          && request.resource.data.companyName.size() <= 100
-          && request.resource.data.companyValue is number
-          && request.resource.data.personalNetWorth is number
-          && request.resource.data.hqTier is number
-          && request.resource.data.totalTaxPaid is number
-          && request.resource.data.annualProfit is number
-          && request.resource.data.updatedAt is number;
-
-        allow delete: if false;
+        match /players/{playerId} {
+          allow read, write: if isValidPin(pin);
+        }
       }
     }
 

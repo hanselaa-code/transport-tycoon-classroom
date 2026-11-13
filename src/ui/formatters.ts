@@ -46,6 +46,10 @@ export function formatGameDate(date: GameDate): string {
   const mIndex = Math.max(0, Math.min(11, (date.month ?? 1) - 1));
   const day = Math.max(1, Math.min(31, date.day ?? 1));
   const year = Math.max(1, date.year ?? 1);
+  const calYear = (date as GameDate & { calendarYear?: number }).calendarYear;
+  if (typeof calYear === 'number' && calYear >= 1800) {
+    return `${day}. ${MONTHS_NO[mIndex]} ${calYear} (År ${year})`;
+  }
   return `${day}. ${MONTHS_NO[mIndex]} År ${year}`;
 }
 
@@ -106,6 +110,8 @@ export const TOOL_LABELS_NO: Record<ToolType, string> = {
   SELECT: 'Inspeksjon / Velg',
   RAIL: 'Bygg jernbanespor (dra på kartet)',
   ROAD: 'Bygg vei (dra på kartet)',
+  RAIL_BRIDGE: 'Bygg jernbanebru (dra rett over vann fra bredd til bredd)',
+  ROAD_BRIDGE: 'Bygg veibru (dra rett over vann fra bredd til bredd)',
   RAIL_DEPOT: 'Plasser togdepot',
   ROAD_DEPOT: 'Plasser bildepot',
   TRAIN_STATION: 'Plasser togstasjon',
@@ -114,6 +120,25 @@ export const TOOL_LABELS_NO: Record<ToolType, string> = {
   SIGNAL: 'Plasser blokksignal på jernbane',
   BULLDOZE: 'Riv / Bulldoser',
   PLACE_HQ: 'Plasser hovedkontor (betales privat!)',
+};
+
+export const TERRAIN_TYPE_LABELS_NO: Record<'flat' | 'hilly' | 'mountainous', string> = {
+  flat: 'Flatt lavland',
+  hilly: 'Bølgende åser',
+  mountainous: 'Norsk fjellterreng',
+};
+
+export const WATER_LEVEL_LABELS_NO: Record<'very_low' | 'low' | 'medium' | 'high', string> = {
+  very_low: 'Svært lite',
+  low: 'Lite',
+  medium: 'Middels',
+  high: 'Mye vann & øyer (Mange bruer)',
+};
+
+export const DENSITY_LABELS_NO: Record<'low' | 'normal' | 'high', string> = {
+  low: 'Få',
+  normal: 'Normalt',
+  high: 'Mange',
 };
 
 export const SCENARIO_LABELS_NO: Record<

@@ -11,14 +11,20 @@ import {
   FloatingPopup,
   GameSpeed,
   GameState,
+  LocalPlayerIdentity,
+  MapSizeOption,
+  ModifiedTileDelta,
+  RemotePlayerWorldSlice,
   ScenarioType,
   Station,
   StationDetailsInfo,
   StationKind,
+  Tile,
   TileInspectionInfo,
   ToolType,
   Vehicle,
   VehicleModelId,
+  WorldSetupConfig,
 } from '../types/game';
 import {
   buildConnectedRoute,
@@ -35,6 +41,7 @@ import {
   COMPANY_COLORS,
   createEmptyCargoRecord,
   createInitialRatingsRecord,
+  DEFAULT_WORLD_SETUP,
   formatGameDate,
   formatKr,
   formatNorwegianNumber,
@@ -45,6 +52,7 @@ import {
 import {
   adjustCorporateLoan,
   buyAICompanyShares,
+  calculatePnLOperatingProfit,
   createInitialCorporateFinance,
   createInitialPersonalFinance,
   distributePeriodicCargoOutput,
@@ -76,8 +84,10 @@ import {
   canTrainEnterNextTile,
   computeDragLineTiles,
   findNetworkPath,
+  getEffectiveTrackElevation,
   getOccupiedRailTileSet,
   GridPoint,
+  isTileTraversableForNetwork,
   refreshSignalLampStates,
 } from './pathfinder';
 import {
@@ -93,6 +103,8 @@ const SUBTICKS_PER_GAME_DAY = 14;
 const POPUP_LIFETIME_MS = 2600;
 const FULL_LOAD_MAX_WAIT_SUBTICKS = 120;
 
+export type DragTrackTool = 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE';
+
 export interface ApplyToolOptions {
   stationLength?: number;
   orientation?: 'X' | 'Y';
@@ -102,7 +114,42 @@ export interface GameEngineOptions {
   mapSize?: number;
   scenario?: ScenarioType;
   seed?: number;
+  worldSetup?: Partial<WorldSetupConfig>;
   autoLoadFromStorage?: boolean;
+}
+
+function normalizeMapSizeOption(raw: number | undefined): MapSizeOption {
+  if (!raw || raw <= 64) return 64;
+  if (raw <= 96) return 96;
+  if (raw <= 128) return 128;
+  return 160;
+}
+
+export function resolveWorldSetup(
+  setup?: Partial<WorldSetupConfig>,
+  fallbackScenario?: ScenarioType,
+  fallbackMapSize?: number,
+  fallbackSeed?: number
+): WorldSetupConfig {
+  const mapSize = normalizeMapSizeOption(setup?.mapSize ?? fallbackMapSize ?? DEFAULT_WORLD_SETUP.mapSize);
+  const aiEnabled = setup?.aiEnabled ?? DEFAULT_WORLD_SETUP.aiEnabled;
+  const rawMaxAi = setup?.maxAiCount ?? (aiEnabled ? DEFAULT_WORLD_SETUP.maxAiCount : 0);
+  const maxAiCount = (!aiEnabled ? 0 : Math.max(0, Math.min(3, Math.round(rawMaxAi)))) as 0 | 1 | 2 | 3;
+
+  return {
+    mapSize,
+    gameMode: setup?.gameMode ?? DEFAULT_WORLD_SETUP.gameMode,
+    playersPerWorld: Math.max(1, Math.min(8, Math.round(setup?.playersPerWorld ?? DEFAULT_WORLD_SETUP.playersPerWorld))),
+    aiEnabled,
+    maxAiCount,
+    terrainType: setup?.terrainType ?? DEFAULT_WORLD_SETUP.terrainType,
+    waterLevel: setup?.waterLevel ?? DEFAULT_WORLD_SETUP.waterLevel,
+    townDensity: setup?.townDensity ?? DEFAULT_WORLD_SETUP.townDensity,
+    industryDensity: setup?.industryDensity ?? DEFAULT_WORLD_SETUP.industryDensity,
+    startYear: Math.max(1900, Math.min(2100, Math.round(setup?.startYear ?? DEFAULT_WORLD_SETUP.startYear))),
+    scenario: setup?.scenario ?? fallbackScenario ?? DEFAULT_WORLD_SETUP.scenario,
+    seed: setup?.seed ?? fallbackSeed ?? DEFAULT_WORLD_SETUP.seed,
+  };
 }
 
 export class GameEngine {
@@ -112,32 +159,68 @@ export class GameEngine {
   private subTickCounter = 0;
   private aiShareCostBasis: Record<string, number> = {};
   private seed: number;
+  private worldSetup: WorldSetupConfig;
+  private localIdentity: LocalPlayerIdentity | null = null;
+  private syncedPeerIds = new Set<string>();
+  private remoteTileBackups = new Map<number, Tile>();
 
   constructor(options: GameEngineOptions = {}) {
-    this.seed = options.seed ?? 20261112;
+    this.seed = options.worldSetup?.seed ?? options.seed ?? DEFAULT_WORLD_SETUP.seed;
+    this.worldSetup = resolveWorldSetup(
+      options.worldSetup,
+      options.scenario,
+      options.mapSize,
+      this.seed
+    );
     if (options.autoLoadFromStorage) {
       const saved = loadStateFromLocalStorage();
       if (saved) {
         this.state = saved;
+        if (saved.worldSetup) {
+          this.worldSetup = resolveWorldSetup(saved.worldSetup);
+          this.seed = this.worldSetup.seed;
+        }
         updateStationRatings(this.state);
         recomputeValuationsAndWarnings(this.state);
         return;
       }
     }
-    this.state = this.buildFreshState(
-      options.scenario ?? 'standard',
-      options.mapSize ?? 64
-    );
+    this.state = this.buildFreshState(this.worldSetup, options.mapSize);
   }
 
-  private buildFreshState(scenario: ScenarioType, mapSize: number): GameState {
-    const cleanSize = mapSize === 96 ? 96 : Math.max(32, Math.min(128, mapSize));
-    const world = generateWorld(cleanSize, scenario, this.seed);
-    const corporate = createInitialCorporateFinance(scenario, 1);
+  private buildFreshState(
+    setup: WorldSetupConfig,
+    rawExplicitMapSize?: number
+  ): GameState {
+    const effectiveMapSize =
+      rawExplicitMapSize !== undefined &&
+      rawExplicitMapSize !== 64 &&
+      rawExplicitMapSize !== 96 &&
+      rawExplicitMapSize !== 128 &&
+      rawExplicitMapSize !== 160
+        ? Math.max(32, Math.min(160, Math.round(rawExplicitMapSize)))
+        : setup.mapSize;
+
+    const world = generateWorld({
+      ...setup,
+      mapSize: effectiveMapSize as MapSizeOption,
+    });
+    const corporate = createInitialCorporateFinance(setup.scenario, 1);
     const personal = createInitialPersonalFinance();
-    const aiCompanies = createInitialAICompanies();
+    if (this.localIdentity) {
+      corporate.companyName = this.localIdentity.companyName;
+      corporate.playerColor = this.localIdentity.playerColor;
+      personal.ownerName = this.localIdentity.ownerName;
+    }
+
+    const aiCompanies = createInitialAICompanies(
+      setup.aiEnabled,
+      setup.maxAiCount
+    );
     this.aiShareCostBasis = {};
     this.subTickCounter = 0;
+    this.syncedPeerIds.clear();
+    this.remoteTileBackups.clear();
 
     const initialState: GameState = {
       mapSize: world.mapSize,
@@ -151,6 +234,7 @@ export class GameEngine {
         day: 1,
         month: 1,
         year: 1,
+        calendarYear: setup.startYear,
         totalDays: 0,
         totalMonths: 0,
       },
@@ -159,14 +243,20 @@ export class GameEngine {
       personal,
       aiCompanies,
       news: [],
-      scenario,
+      scenario: setup.scenario,
+      worldSetup: { ...setup },
+      remotePlayers: [],
       networkRevision: 1,
       lastSavedAtMs: null,
     };
 
+    const aiNotice =
+      setup.aiEnabled && setup.maxAiCount > 0
+        ? 'Bygg lønnsomme jernbane- og veiruter før første konkurrent børsnoteres i År 2.'
+        : 'Bygg lønnsomme jernbane- og veiruter i en åpen verden uten AI-konkurrenter!';
     pushNews(
       initialState,
-      `Velkommen til ${corporate.companyName}! Bygg lønnsomme jernbane- og veiruter før første konkurrent børsnoteres i År 2.`,
+      `Velkommen til ${corporate.companyName}! ${aiNotice}`,
       'INFO'
     );
     recomputeValuationsAndWarnings(initialState);
@@ -316,6 +406,9 @@ export class GameEngine {
       if (d.month >= 12) {
         d.month = 1;
         d.year += 1;
+        const baseStartYear =
+          this.state.worldSetup?.startYear ?? DEFAULT_WORLD_SETUP.startYear;
+        d.calendarYear = baseStartYear + d.year - 1;
         runYearlyRolloverTick(this.state, d.year);
       } else {
         d.month += 1;
@@ -365,11 +458,24 @@ export class GameEngine {
       return;
     }
 
-    // Ensure valid path to targetStation
+    // Ensure valid path to targetStation (and verify next step wasn't bulldozed)
+    const firstPathPt = vehicle.path[0];
     const lastPathPt = vehicle.path[vehicle.path.length - 1];
+    const firstStepTile =
+      firstPathPt && inBounds(firstPathPt.x, firstPathPt.y, this.state.mapSize)
+        ? this.state.tiles[tileIndex(firstPathPt.x, firstPathPt.y, this.state.mapSize)]
+        : null;
+    const firstStepTraversable = Boolean(
+      firstStepTile &&
+        (isTileTraversableForNetwork(firstStepTile, vehicle.network) ||
+          targetStation.tiles.some(
+            (t) => t.x === firstPathPt.x && t.y === firstPathPt.y
+          ))
+    );
     const pathValid =
       vehicle.path.length > 0 &&
-      lastPathPt &&
+      firstStepTraversable &&
+      Boolean(lastPathPt) &&
       targetStation.tiles.some(
         (t) => t.x === lastPathPt.x && t.y === lastPathPt.y
       );
@@ -477,8 +583,8 @@ export class GameEngine {
     const curTile = this.state.tiles[tileIndex(vehicle.x, vehicle.y, this.state.mapSize)];
     const nextTile = this.state.tiles[tileIndex(nextStep.x, nextStep.y, this.state.mapSize)];
     const slopeFactor = calculateSlopeSpeedFactor(
-      curTile.elevation,
-      nextTile.elevation,
+      getEffectiveTrackElevation(curTile),
+      getEffectiveTrackElevation(nextTile),
       vehicle.network === 'RAIL' ? 'rail' : 'road'
     );
 
@@ -519,6 +625,31 @@ export class GameEngine {
   }
 
   private handleVehicleAtStation(vehicle: Vehicle, station: Station): void {
+    if (this.syncedPeerIds.has(vehicle.ownerId)) {
+      if (vehicle.state !== 'LOADING') {
+        vehicle.state = 'LOADING';
+        vehicle.speedKmh = 0;
+        vehicle.progress = 0;
+        vehicle.accelTicks = 0;
+        vehicle.nextX = vehicle.x;
+        vehicle.nextY = vehicle.y;
+        vehicle.loadingTicksRemaining = 5;
+      } else {
+        vehicle.loadingTicksRemaining = Math.max(
+          0,
+          (vehicle.loadingTicksRemaining ?? 1) - 1
+        );
+        if ((vehicle.loadingTicksRemaining ?? 0) <= 0) {
+          vehicle.currentOrderIndex =
+            (vehicle.currentOrderIndex + 1) % Math.max(1, vehicle.orders.length);
+          vehicle.state = 'MOVING';
+          vehicle.accelTicks = 0;
+          vehicle.path = [];
+        }
+      }
+      return;
+    }
+
     if (vehicle.state !== 'LOADING') {
       vehicle.state = 'LOADING';
       vehicle.speedKmh = 0;
@@ -782,11 +913,44 @@ export class GameEngine {
       return res;
     }
 
+    if (tool === 'ROAD_BRIDGE' || tool === 'RAIL_BRIDGE') {
+      // Allow single-clicking a 1-tile narrow water channel if dry land is on opposite sides
+      if (tile.terrain === 'WATER') {
+        const horizLand =
+          inBounds(rx - 1, ry, this.state.mapSize) &&
+          inBounds(rx + 1, ry, this.state.mapSize) &&
+          this.state.tiles[tileIndex(rx - 1, ry, this.state.mapSize)].terrain !== 'WATER' &&
+          this.state.tiles[tileIndex(rx + 1, ry, this.state.mapSize)].terrain !== 'WATER';
+        if (horizLand) {
+          return this.applyDragTrackOrRoad(rx - 1, ry, rx + 1, ry, tool);
+        }
+        const vertLand =
+          inBounds(rx, ry - 1, this.state.mapSize) &&
+          inBounds(rx, ry + 1, this.state.mapSize) &&
+          this.state.tiles[tileIndex(rx, ry - 1, this.state.mapSize)].terrain !== 'WATER' &&
+          this.state.tiles[tileIndex(rx, ry + 1, this.state.mapSize)].terrain !== 'WATER';
+        if (vertLand) {
+          return this.applyDragTrackOrRoad(rx, ry - 1, rx, ry + 1, tool);
+        }
+      }
+      return {
+        ok: false,
+        message: 'Dra broen i rett linje fra kyst til kyst over vannet (1–24 ruter).',
+      };
+    }
+
     if (tool === 'SIGNAL') {
-      if (!tile.rail || tile.road || tile.stationId || tile.depot) {
+      if (
+        !tile.rail ||
+        tile.road ||
+        tile.bridge ||
+        tile.terrain === 'WATER' ||
+        tile.stationId ||
+        tile.depot
+      ) {
         return {
           ok: false,
-          message: 'Blokksignal må plasseres på et eksisterende jernbanespor uten planovergang/stasjon/depot.',
+          message: 'Blokksignal må plasseres på et eksisterende jernbanespor på land uten planovergang/stasjon/depot.',
         };
       }
       if (tile.signal) {
@@ -920,7 +1084,11 @@ export class GameEngine {
         };
       }
 
-      const id = `st-${this.state.stations.length + 1}-${Math.random()
+      const idPrefix =
+        this.localIdentity && this.localIdentity.clientId !== 'player'
+          ? `${this.localIdentity.clientId}-`
+          : '';
+      const id = `st-${idPrefix}${this.state.stations.length + 1}-${Math.random()
         .toString(36)
         .slice(2, 5)}`;
 
@@ -983,10 +1151,16 @@ export class GameEngine {
     }
 
     if (tool === 'BULLDOZE') {
-      if (tile.terrain === 'WATER' || tile.industryId || tile.hqOwnerId) {
+      if (tile.industryId || tile.hqOwnerId) {
         return {
           ok: false,
-          message: 'Kan ikke rive vann, industrier eller hovedkontor.',
+          message: 'Kan ikke rive industrier eller hovedkontor.',
+        };
+      }
+      if (tile.terrain === 'WATER' && !tile.bridge) {
+        return {
+          ok: false,
+          message: 'Kan ikke rive åpent vann.',
         };
       }
       if (tile.ownerId && tile.ownerId !== 'player') {
@@ -996,7 +1170,9 @@ export class GameEngine {
         return { ok: false, message: 'Bykommunen nekter riving av bygårder.' };
       }
 
+      const wasBridge = Boolean(tile.bridge);
       const hasAnything =
+        wasBridge ||
         tile.road ||
         tile.rail ||
         tile.signal ||
@@ -1034,20 +1210,258 @@ export class GameEngine {
       tile.rail = false;
       tile.signal = false;
       tile.signalBlocked = false;
+      tile.bridge = null;
+      tile.bridgeAxis = undefined;
       tile.depot = null;
       tile.stationId = null;
       tile.ownerId = null;
-      if (tile.terrain === 'FOREST_TREES') {
+      if (wasBridge) {
+        tile.terrain = 'WATER';
+        tile.elevation = 0;
+      } else if (tile.terrain === 'FOREST_TREES') {
         tile.terrain = 'GRASS';
+      }
+
+      // Clear cached paths passing through the bulldozed tile so vehicles reroute immediately
+      for (const v of this.state.vehicles) {
+        if (v.path.some((p) => p.x === rx && p.y === ry)) {
+          v.path = [];
+        }
       }
 
       this.spendCorporateConstruction(cost, rx, ry);
       this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
       this.emit();
-      return { ok: true, cost, message: 'Ryddet rute.' };
+      return {
+        ok: true,
+        cost,
+        message: wasBridge ? 'Rev broen.' : 'Ryddet rute.',
+      };
     }
 
     return { ok: false, message: 'Ukjent verktøy.' };
+  }
+
+  private canLandTileAnchorOrBuild(
+    tile: Tile,
+    mode: 'RAIL' | 'ROAD'
+  ): { ok: boolean; buildCost: number } {
+    if (tile.terrain === 'WATER' || tile.bridge) {
+      return { ok: false, buildCost: 0 };
+    }
+    if (mode === 'ROAD' && (tile.road || tile.depot === 'ROAD')) {
+      return { ok: true, buildCost: 0 };
+    }
+    if (mode === 'RAIL' && (tile.rail || tile.depot === 'RAIL')) {
+      return { ok: true, buildCost: 0 };
+    }
+    if (
+      tile.industryId ||
+      tile.hqOwnerId ||
+      tile.depot ||
+      tile.stationId ||
+      (tile.buildingTier ?? 0) > 0 ||
+      (mode === 'ROAD' && tile.signal)
+    ) {
+      return { ok: false, buildCost: 0 };
+    }
+    return { ok: true, buildCost: BUILD_COSTS[mode] };
+  }
+
+  private planDragTrackOrBridge(
+    rawPoints: GridPoint[],
+    tool: DragTrackTool
+  ): Array<{
+    x: number;
+    y: number;
+    isBridge: boolean;
+    axis?: 'X' | 'Y';
+    cost: number;
+  }> {
+    const baseMode: 'RAIL' | 'ROAD' =
+      tool === 'RAIL' || tool === 'RAIL_BRIDGE' ? 'RAIL' : 'ROAD';
+    const isExplicitBridge =
+      tool === 'RAIL_BRIDGE' || tool === 'ROAD_BRIDGE';
+
+    const points = rawPoints.filter((p) =>
+      inBounds(p.x, p.y, this.state.mapSize)
+    );
+    if (points.length === 0) return [];
+
+    const allSameX =
+      points.length >= 2 && points.every((p) => p.x === points[0].x);
+    const allSameY =
+      points.length >= 2 && points.every((p) => p.y === points[0].y);
+    const isStraight = (allSameX || allSameY) && !(allSameX && allSameY);
+    const axis: 'X' | 'Y' | null = isStraight
+      ? allSameY
+        ? 'X'
+        : 'Y'
+      : null;
+
+    const workingPts = [...points];
+
+    // Convenience: when dragging explicit bridge tool starting/ending on coastal water right next to dry shore, auto-attach the 1-tile shore approach
+    if (isExplicitBridge && isStraight && workingPts.length >= 1) {
+      const first = workingPts[0];
+      const last = workingPts[workingPts.length - 1];
+      const stepX = Math.sign(last.x - first.x);
+      const stepY = Math.sign(last.y - first.y);
+      if (stepX !== 0 || stepY !== 0) {
+        const firstTile =
+          this.state.tiles[tileIndex(first.x, first.y, this.state.mapSize)];
+        if (firstTile.terrain === 'WATER') {
+          const prevX = first.x - stepX;
+          const prevY = first.y - stepY;
+          if (inBounds(prevX, prevY, this.state.mapSize)) {
+            const prevTile =
+              this.state.tiles[tileIndex(prevX, prevY, this.state.mapSize)];
+            if (prevTile.terrain !== 'WATER') {
+              workingPts.unshift({ x: prevX, y: prevY });
+            }
+          }
+        }
+        const lastAfter = workingPts[workingPts.length - 1];
+        const lastTile =
+          this.state.tiles[
+            tileIndex(lastAfter.x, lastAfter.y, this.state.mapSize)
+          ];
+        if (lastTile.terrain === 'WATER') {
+          const nextX = lastAfter.x + stepX;
+          const nextY = lastAfter.y + stepY;
+          if (inBounds(nextX, nextY, this.state.mapSize)) {
+            const nextTile =
+              this.state.tiles[tileIndex(nextX, nextY, this.state.mapSize)];
+            if (nextTile.terrain !== 'WATER') {
+              workingPts.push({ x: nextX, y: nextY });
+            }
+          }
+        }
+      }
+    }
+
+    const validBridgeWaterIndices = new Set<number>();
+    const bridgeShoreIndices = new Set<number>();
+
+    if (axis !== null && workingPts.length >= 3) {
+      let i = 0;
+      while (i < workingPts.length) {
+        const t =
+          this.state.tiles[
+            tileIndex(workingPts[i].x, workingPts[i].y, this.state.mapSize)
+          ];
+        if (t.terrain !== 'WATER') {
+          i++;
+          continue;
+        }
+        const wStart = i;
+        while (
+          i < workingPts.length &&
+          this.state.tiles[
+            tileIndex(workingPts[i].x, workingPts[i].y, this.state.mapSize)
+          ].terrain === 'WATER'
+        ) {
+          i++;
+        }
+        const wEnd = i - 1;
+        const waterLen = wEnd - wStart + 1;
+
+        if (
+          waterLen >= 1 &&
+          waterLen <= 24 &&
+          wStart >= 1 &&
+          wEnd <= workingPts.length - 2
+        ) {
+          const leftShore =
+            this.state.tiles[
+              tileIndex(
+                workingPts[wStart - 1].x,
+                workingPts[wStart - 1].y,
+                this.state.mapSize
+              )
+            ];
+          const rightShore =
+            this.state.tiles[
+              tileIndex(
+                workingPts[wEnd + 1].x,
+                workingPts[wEnd + 1].y,
+                this.state.mapSize
+              )
+            ];
+          const leftCheck = this.canLandTileAnchorOrBuild(leftShore, baseMode);
+          const rightCheck = this.canLandTileAnchorOrBuild(rightShore, baseMode);
+
+          let waterSpanClear = leftCheck.ok && rightCheck.ok;
+          for (let k = wStart; k <= wEnd && waterSpanClear; k++) {
+            const wt =
+              this.state.tiles[
+                tileIndex(workingPts[k].x, workingPts[k].y, this.state.mapSize)
+              ];
+            if (
+              wt.industryId ||
+              wt.hqOwnerId ||
+              wt.stationId ||
+              wt.depot ||
+              (wt.bridge && (wt.bridge !== baseMode || wt.bridgeAxis !== axis))
+            ) {
+              waterSpanClear = false;
+            }
+          }
+
+          if (waterSpanClear) {
+            bridgeShoreIndices.add(wStart - 1);
+            bridgeShoreIndices.add(wEnd + 1);
+            for (let k = wStart; k <= wEnd; k++) {
+              validBridgeWaterIndices.add(k);
+            }
+          }
+        }
+      }
+    }
+
+    const planned: Array<{
+      x: number;
+      y: number;
+      isBridge: boolean;
+      axis?: 'X' | 'Y';
+      cost: number;
+    }> = [];
+
+    const bridgeUnitCost =
+      baseMode === 'RAIL' ? BUILD_COSTS.RAIL_BRIDGE : BUILD_COSTS.ROAD_BRIDGE;
+
+    for (let idx = 0; idx < workingPts.length; idx++) {
+      const pt = workingPts[idx];
+      const tile =
+        this.state.tiles[tileIndex(pt.x, pt.y, this.state.mapSize)];
+
+      if (tile.terrain === 'WATER') {
+        if (!validBridgeWaterIndices.has(idx) || !axis) continue;
+        const alreadySameBridge =
+          tile.bridge === baseMode && tile.bridgeAxis === axis;
+        planned.push({
+          x: pt.x,
+          y: pt.y,
+          isBridge: true,
+          axis,
+          cost: alreadySameBridge ? 0 : bridgeUnitCost,
+        });
+      } else {
+        if (isExplicitBridge && !bridgeShoreIndices.has(idx)) {
+          continue;
+        }
+        const landCheck = this.canLandTileAnchorOrBuild(tile, baseMode);
+        if (!landCheck.ok) continue;
+        planned.push({
+          x: pt.x,
+          y: pt.y,
+          isBridge: false,
+          cost: landCheck.buildCost,
+        });
+      }
+    }
+
+    return planned;
   }
 
   public previewDragPath(
@@ -1055,49 +1469,42 @@ export class GameEngine {
     fromY: number,
     toX: number,
     toY: number,
-    tool: 'RAIL' | 'ROAD'
+    tool: DragTrackTool
   ): { tiles: Array<{ x: number; y: number }>; cost: number } {
     const line = computeDragLineTiles(fromX, fromY, toX, toY, this.state.mapSize);
-    const validTiles: Array<{ x: number; y: number }> = [];
-    const unitCost = BUILD_COSTS[tool];
-    let cost = 0;
-
-    for (const pt of line) {
-      const t = this.state.tiles[tileIndex(pt.x, pt.y, this.state.mapSize)];
-      if (
-        t.terrain === 'WATER' ||
-        t.industryId ||
-        t.hqOwnerId ||
-        (t.buildingTier ?? 0) > 0
-      ) {
-        continue;
-      }
-      validTiles.push(pt);
-      if (tool === 'ROAD' && !t.road) cost += unitCost;
-      if (tool === 'RAIL' && !t.rail) cost += unitCost;
+    const planned = this.planDragTrackOrBridge(line, tool);
+    const isExplicitBridge =
+      tool === 'RAIL_BRIDGE' || tool === 'ROAD_BRIDGE';
+    if (isExplicitBridge && !planned.some((p) => p.isBridge)) {
+      return { tiles: [], cost: 0 };
     }
-
+    let cost = 0;
+    const validTiles: Array<{ x: number; y: number }> = [];
+    for (const item of planned) {
+      validTiles.push({ x: item.x, y: item.y });
+      cost += item.cost;
+    }
     return { tiles: validTiles, cost };
   }
 
   /**
    * Supports both:
-   * - `applyDragTrackOrRoad(fromX, fromY, toX, toY, 'RAIL' | 'ROAD')`
-   * - `applyDragTrackOrRoad(tilesArray, 'RAIL' | 'ROAD')`
+   * - `applyDragTrackOrRoad(fromX, fromY, toX, toY, 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE')`
+   * - `applyDragTrackOrRoad(tilesArray, 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE')`
    */
   public applyDragTrackOrRoad(
     arg1: number | Array<{ x: number; y: number }>,
-    arg2: number | 'RAIL' | 'ROAD',
+    arg2: number | DragTrackTool,
     toX?: number,
     toY?: number,
-    toolArg?: 'RAIL' | 'ROAD'
+    toolArg?: DragTrackTool
   ): ActionResult {
     let points: GridPoint[];
-    let tool: 'RAIL' | 'ROAD';
+    let tool: DragTrackTool;
 
     if (Array.isArray(arg1)) {
       points = arg1;
-      tool = (arg2 === 'RAIL' ? 'RAIL' : 'ROAD');
+      tool = typeof arg2 === 'string' ? arg2 : 'ROAD';
     } else {
       const fx = arg1;
       const fy = typeof arg2 === 'number' ? arg2 : 0;
@@ -1107,17 +1514,72 @@ export class GameEngine {
       points = computeDragLineTiles(fx, fy, tx, ty, this.state.mapSize);
     }
 
+    const baseMode: 'RAIL' | 'ROAD' =
+      tool === 'RAIL' || tool === 'RAIL_BRIDGE' ? 'RAIL' : 'ROAD';
+    const isExplicitBridge =
+      tool === 'RAIL_BRIDGE' || tool === 'ROAD_BRIDGE';
+
+    const planned = this.planDragTrackOrBridge(points, tool);
+    const hasBridgeSpan = planned.some((p) => p.isBridge);
+
+    if (isExplicitBridge && !hasBridgeSpan) {
+      return {
+        ok: false,
+        cost: 0,
+        message: 'Dra broen i rett linje fra kyst til kyst over vannet (1–24 ruter).',
+      };
+    }
+
+    const plannedTotalCost = planned.reduce((sum, p) => sum + p.cost, 0);
+    if (hasBridgeSpan && this.state.corporate.cash < plannedTotalCost) {
+      return {
+        ok: false,
+        cost: 0,
+        message: `Ikke nok selskapskontanter til å bygge broen (${formatKr(plannedTotalCost)} kreves).`,
+      };
+    }
+
     let builtCount = 0;
+    let bridgeBuiltCount = 0;
     let totalCost = 0;
     let lastPt: GridPoint | null = null;
 
-    for (const pt of points) {
-      if (!inBounds(pt.x, pt.y, this.state.mapSize)) continue;
-      const res = this.buildSingleTrackOrRoadTile(pt.x, pt.y, tool, false);
-      if (res.ok && (res.cost ?? 0) > 0) {
-        builtCount++;
-        totalCost += res.cost ?? 0;
-        lastPt = pt;
+    for (const item of planned) {
+      if (item.isBridge) {
+        const tile =
+          this.state.tiles[tileIndex(item.x, item.y, this.state.mapSize)];
+        if (item.cost > 0) {
+          if (this.state.corporate.cash < item.cost) break;
+          this.state.corporate.cash -= item.cost;
+          this.state.corporate.currentYearPnL.constructionCost += item.cost;
+          tile.terrain = 'WATER';
+          tile.elevation = 0;
+          tile.bridge = baseMode;
+          tile.bridgeAxis = item.axis;
+          tile.road = baseMode === 'ROAD';
+          tile.rail = baseMode === 'RAIL';
+          tile.signal = false;
+          tile.signalBlocked = false;
+          if (!tile.ownerId) {
+            tile.ownerId = 'player';
+          }
+          builtCount++;
+          bridgeBuiltCount++;
+          totalCost += item.cost;
+          lastPt = { x: item.x, y: item.y };
+        }
+      } else {
+        const res = this.buildSingleTrackOrRoadTile(
+          item.x,
+          item.y,
+          baseMode,
+          false
+        );
+        if (res.ok && (res.cost ?? 0) > 0) {
+          builtCount++;
+          totalCost += res.cost ?? 0;
+          lastPt = { x: item.x, y: item.y };
+        }
       }
     }
 
@@ -1131,15 +1593,23 @@ export class GameEngine {
       this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
       recomputeValuationsAndWarnings(this.state);
       this.emit();
+      const label =
+        bridgeBuiltCount > 0
+          ? baseMode === 'RAIL'
+            ? `jernbanebro (${bridgeBuiltCount} vannruter)`
+            : `veibro (${bridgeBuiltCount} vannruter)`
+          : baseMode === 'RAIL'
+            ? 'jernbane'
+            : 'vei';
       return {
         ok: true,
         cost: totalCost,
-        message: `Bygget ${builtCount} ruter ${tool === 'RAIL' ? 'jernbane' : 'vei'} (${formatKr(totalCost)}).`,
+        message: `Bygget ${builtCount} ruter ${label} (${formatKr(totalCost)}).`,
       };
     }
 
     return {
-      ok: builtCount > 0,
+      ok: planned.length > 0 && plannedTotalCost === 0,
       cost: 0,
       message: 'Ingen nye ruter ble bygget.',
     };
@@ -1154,6 +1624,7 @@ export class GameEngine {
     const tile = this.state.tiles[tileIndex(x, y, this.state.mapSize)];
     if (
       tile.terrain === 'WATER' ||
+      tile.bridge ||
       tile.industryId ||
       tile.hqOwnerId ||
       tile.depot ||
@@ -1310,8 +1781,12 @@ export class GameEngine {
       this.state.stations.some((s) => s.id === id)
     );
 
+    const vehPrefix =
+      this.localIdentity && this.localIdentity.clientId !== 'player'
+        ? `${this.localIdentity.clientId}-`
+        : '';
     const vehicle: Vehicle = {
-      id: `veh-${this.state.vehicles.length + 1}-${Math.random()
+      id: `veh-${vehPrefix}${this.state.vehicles.length + 1}-${Math.random()
         .toString(36)
         .slice(2, 5)}`,
       name: `${labelPrefix} #${playerFleetCount} (${CARGO_LABELS_NO[selectedCargo]})`,
@@ -1516,9 +1991,18 @@ export class GameEngine {
       ? this.state.stations.find((s) => s.id === tile.stationId) ?? null
       : null;
 
+    const remotePeerOwner =
+      tile.ownerId || tile.hqOwnerId
+        ? (this.state.remotePlayers ?? []).find(
+            (p) => p.clientId === tile.ownerId || p.clientId === tile.hqOwnerId
+          )
+        : undefined;
+
     let ownerName = 'Kommunal / Ingen eier';
     if (tile.ownerId === 'player' || tile.hqOwnerId === 'player') {
       ownerName = this.state.corporate.companyName;
+    } else if (remotePeerOwner) {
+      ownerName = remotePeerOwner.companyName;
     } else if (tile.ownerId) {
       const ai = this.state.aiCompanies.find((c) => c.id === tile.ownerId);
       if (ai) ownerName = ai.name;
@@ -1554,10 +2038,26 @@ export class GameEngine {
       producesSet.add('MAIL');
     }
 
+    let hqTier: number | null = null;
+    if (tile.hqOwnerId === 'player') {
+      hqTier = this.state.corporate.hqTier;
+    } else if (tile.hqOwnerId && remotePeerOwner) {
+      hqTier = tile.hqOwnerTier ?? remotePeerOwner.hqTier ?? 1;
+    } else if (tile.hqOwnerTier) {
+      hqTier = tile.hqOwnerTier;
+    }
+
     let descriptionNo = terrainLabelNo;
     if (tile.hqOwnerId === 'player') {
       const hqSpec = getHQTierSpec(this.state.corporate.hqTier);
       descriptionNo = `Hovedkontor: ${hqSpec ? hqSpec.nameNo : 'Nivå 1'}`;
+    } else if (tile.hqOwnerId && remotePeerOwner) {
+      const hqSpec = getHQTierSpec(hqTier ?? 1);
+      descriptionNo = `Hovedkontor (${remotePeerOwner.companyName}): ${hqSpec ? hqSpec.nameNo : 'Nivå 1'}`;
+    } else if (tile.bridge === 'RAIL') {
+      descriptionNo = 'Jernbanebro over vann';
+    } else if (tile.bridge === 'ROAD') {
+      descriptionNo = 'Veibro over vann';
     } else if (station) {
       descriptionNo = `Stasjon: ${station.name}`;
     } else if (tile.depot === 'RAIL') {
@@ -1595,8 +2095,10 @@ export class GameEngine {
       road: tile.road,
       rail: tile.rail,
       signal: tile.signal,
+      bridge: tile.bridge ?? null,
+      bridgeAxis: tile.bridgeAxis ?? null,
       depot: tile.depot ?? null,
-      hqTier: tile.hqOwnerId === 'player' ? this.state.corporate.hqTier : null,
+      hqTier,
       ownerId: tile.ownerId ?? null,
       ownerName,
       townId: town?.id ?? null,
@@ -1622,16 +2124,25 @@ export class GameEngine {
     updateStationRatings(this.state);
 
     const isPlayerOwned = station.ownerId === 'player';
-    const aiOwner = !isPlayerOwned
-      ? this.state.aiCompanies.find((c) => c.id === station.ownerId)
+    const remoteOwner = !isPlayerOwned
+      ? (this.state.remotePlayers ?? []).find(
+          (p) => p.clientId === station.ownerId
+        )
       : undefined;
+    const aiOwner =
+      !isPlayerOwned && !remoteOwner
+        ? this.state.aiCompanies.find((c) => c.id === station.ownerId)
+        : undefined;
 
     const ownerName = isPlayerOwned
       ? this.state.corporate.companyName
-      : aiOwner?.name ?? 'Konkurrent AS';
+      : remoteOwner?.companyName ?? aiOwner?.name ?? 'Konkurrent AS';
     const ownerColor = isPlayerOwned
-      ? COMPANY_COLORS.player
-      : aiOwner?.color ?? COMPANY_COLORS[station.ownerId] ?? '#dc2626';
+      ? this.state.corporate.playerColor ?? COMPANY_COLORS.player
+      : remoteOwner?.color ??
+        aiOwner?.color ??
+        COMPANY_COLORS[station.ownerId] ??
+        '#dc2626';
 
     const suppliedCargos = getStationSuppliedCargos(this.state, station);
     const acceptedCargos = getStationAcceptedCargosWithSources(this.state, station);
@@ -1742,10 +2253,340 @@ export class GameEngine {
     const cleanOwner = ownerName.trim();
     if (cleanComp) {
       this.state.corporate.companyName = cleanComp;
+      if (this.localIdentity) {
+        this.localIdentity.companyName = cleanComp;
+      }
     }
     if (cleanOwner) {
       this.state.personal.ownerName = cleanOwner;
+      if (this.localIdentity) {
+        this.localIdentity.ownerName = cleanOwner;
+      }
     }
+    this.emit();
+  }
+
+  // ============================================================================
+  // Shared-World Multiplayer Peer Sync
+  // ============================================================================
+
+  public setLocalPlayerIdentity(params: LocalPlayerIdentity): void {
+    const clientId = params.clientId.trim() || 'player';
+    const ownerName =
+      params.ownerName.trim() || this.state.personal.ownerName;
+    const companyName =
+      params.companyName.trim() || this.state.corporate.companyName;
+    const playerColor =
+      params.playerColor.trim() ||
+      this.state.corporate.playerColor ||
+      COMPANY_COLORS.player;
+
+    this.localIdentity = {
+      clientId,
+      ownerName,
+      companyName,
+      playerColor,
+    };
+
+    this.state.personal.ownerName = ownerName;
+    this.state.corporate.companyName = companyName;
+    this.state.corporate.playerColor = playerColor;
+    this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
+    this.emit();
+  }
+
+  public exportMultiplayerSlice(): RemotePlayerWorldSlice {
+    const clientId = this.localIdentity?.clientId ?? 'player';
+    const color =
+      this.state.corporate.playerColor ??
+      this.localIdentity?.playerColor ??
+      COMPANY_COLORS.player;
+
+    const modifiedTiles: ModifiedTileDelta[] = [];
+    for (const t of this.state.tiles) {
+      const isPlayerModified =
+        (t.ownerId === 'player' || t.hqOwnerId === 'player') &&
+        Boolean(
+          t.road ||
+            t.rail ||
+            t.signal ||
+            t.bridge ||
+            t.depot ||
+            t.stationId ||
+            t.hqOwnerId === 'player'
+        );
+      if (!isPlayerModified) continue;
+
+      const delta: ModifiedTileDelta = { x: t.x, y: t.y };
+      if (t.road) delta.road = true;
+      if (t.rail) delta.rail = true;
+      if (t.signal) delta.signal = true;
+      if (t.bridge) {
+        delta.bridge = t.bridge;
+        if (t.bridgeAxis) delta.bridgeAxis = t.bridgeAxis;
+      }
+      if (t.depot) delta.depot = t.depot;
+      if (t.stationId) delta.stationId = t.stationId;
+      if (t.hqOwnerId === 'player') {
+        delta.hqOwnerId = clientId;
+        delta.hqOwnerTier = this.state.corporate.hqTier || 1;
+      }
+      modifiedTiles.push(delta);
+    }
+
+    const stations: Station[] = this.state.stations
+      .filter((s) => s.ownerId === 'player')
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        ownerId: clientId,
+        kind: s.kind,
+        x: s.x,
+        y: s.y,
+        tiles: s.tiles.map((pt) => ({ x: pt.x, y: pt.y })),
+        townId: s.townId,
+        nearbyIndustryIds: [...s.nearbyIndustryIds],
+        waitingCargo: { ...s.waitingCargo },
+        ratings: { ...s.ratings },
+        daysSincePickup: s.daysSincePickup,
+        lastVehicleMaxSpeedKmh: s.lastVehicleMaxSpeedKmh ?? 88,
+      }));
+
+    const vehicles: Vehicle[] = this.state.vehicles
+      .filter((v) => v.ownerId === 'player')
+      .map((v) => ({
+        id: v.id,
+        name: v.name,
+        ownerId: clientId,
+        network: v.network,
+        modelId: v.modelId,
+        cargoType: v.cargoType,
+        capacity: v.capacity,
+        cargoAmount: v.cargoAmount,
+        cargoOriginStationId: v.cargoOriginStationId,
+        cargoLoadedDay: v.cargoLoadedDay,
+        x: v.x,
+        y: v.y,
+        nextX: v.nextX,
+        nextY: v.nextY,
+        progress: v.progress,
+        direction: v.direction,
+        speedKmh: v.speedKmh,
+        maxSpeedKmh: v.maxSpeedKmh,
+        state: v.state,
+        orders: [...v.orders],
+        currentOrderIndex: v.currentOrderIndex,
+        path: v.path.map((pt) => ({ x: pt.x, y: pt.y })),
+        profitThisYear: v.profitThisYear,
+        runningCostPerMonth: v.runningCostPerMonth,
+        purchaseValue: v.purchaseValue,
+        ageMonths: v.ageMonths,
+        wagonCount: v.wagonCount,
+        trail: (v.trail ?? [{ x: v.x, y: v.y }]).map((pt) => ({
+          x: pt.x,
+          y: pt.y,
+        })),
+        depotX: v.depotX ?? v.x,
+        depotY: v.depotY ?? v.y,
+        loadingTicksRemaining: v.loadingTicksRemaining ?? 0,
+        waitForFullLoad: Boolean(v.waitForFullLoad),
+        accelTicks: v.accelTicks ?? 0,
+        fullLoadWaitTicks: v.fullLoadWaitTicks ?? 0,
+      }));
+
+    const curProfit = calculatePnLOperatingProfit(
+      this.state.corporate.currentYearPnL
+    );
+    const prevProfit = calculatePnLOperatingProfit(
+      this.state.corporate.lastYearPnL
+    );
+    const annualProfit =
+      this.state.date.year === 1
+        ? curProfit
+        : Math.round(curProfit * 0.6 + prevProfit * 0.4);
+
+    return {
+      clientId,
+      ownerName: this.state.personal.ownerName,
+      companyName: this.state.corporate.companyName,
+      color,
+      cash: this.state.corporate.cash,
+      companyValue: this.state.corporate.companyValue,
+      annualProfit,
+      hqTile: this.state.corporate.hqTile
+        ? { ...this.state.corporate.hqTile }
+        : null,
+      hqTier: this.state.corporate.hqTier,
+      modifiedTiles,
+      stations,
+      vehicles,
+      updatedAt: Date.now(),
+    };
+  }
+
+  public syncMultiplayerPeers(peers: RemotePlayerWorldSlice[]): void {
+    const selfId = this.localIdentity?.clientId ?? 'player';
+    const validPeers = (Array.isArray(peers) ? peers : []).filter(
+      (p) =>
+        Boolean(p && typeof p.clientId === 'string' && p.clientId) &&
+        p.clientId !== selfId &&
+        p.clientId !== 'player'
+    );
+
+    const incomingIds = new Set(validPeers.map((p) => p.clientId));
+    const allRemoteIds = new Set<string>([
+      ...this.syncedPeerIds,
+      ...incomingIds,
+    ]);
+
+    // 1. Revert any previously applied remote tile modifications (unless local 'player' now owns that tile)
+    for (const [idx, backup] of this.remoteTileBackups.entries()) {
+      const cur = this.state.tiles[idx];
+      if (!cur) continue;
+      if (cur.ownerId === 'player' || cur.hqOwnerId === 'player') {
+        continue;
+      }
+      this.state.tiles[idx] = { ...backup };
+    }
+    this.remoteTileBackups.clear();
+
+    // 2. Remove stale remote stations & vehicles
+    if (allRemoteIds.size > 0) {
+      this.state.stations = this.state.stations.filter(
+        (s) => !allRemoteIds.has(s.ownerId)
+      );
+      this.state.vehicles = this.state.vehicles.filter(
+        (v) => !allRemoteIds.has(v.ownerId)
+      );
+    }
+
+    this.syncedPeerIds = incomingIds;
+    this.state.remotePlayers = validPeers.map((p) => ({
+      ...p,
+      modifiedTiles: Array.isArray(p.modifiedTiles) ? p.modifiedTiles : [],
+      stations: Array.isArray(p.stations) ? p.stations : [],
+      vehicles: Array.isArray(p.vehicles) ? p.vehicles : [],
+    }));
+
+    const backupTileIfNeeded = (idx: number) => {
+      if (!this.remoteTileBackups.has(idx)) {
+        this.remoteTileBackups.set(idx, { ...this.state.tiles[idx] });
+      }
+    };
+
+    // 3. Apply each active peer's tiles, HQ, stations, and vehicles
+    for (const peer of this.state.remotePlayers) {
+      const peerId = peer.clientId;
+
+      for (const mt of peer.modifiedTiles) {
+        if (!mt || !inBounds(mt.x, mt.y, this.state.mapSize)) continue;
+        const idx = tileIndex(mt.x, mt.y, this.state.mapSize);
+        const tile = this.state.tiles[idx];
+        if (tile.ownerId === 'player' || tile.hqOwnerId === 'player') continue;
+
+        backupTileIfNeeded(idx);
+
+        if (mt.bridge) {
+          tile.terrain = 'WATER';
+          tile.elevation = 0;
+          tile.bridge = mt.bridge;
+          tile.bridgeAxis = mt.bridgeAxis ?? 'X';
+          tile.road = mt.bridge === 'ROAD';
+          tile.rail = mt.bridge === 'RAIL';
+          tile.ownerId = peerId;
+        } else {
+          if (tile.terrain !== 'WATER') {
+            tile.terrain = 'GRASS';
+          }
+          if (mt.road) tile.road = true;
+          if (mt.rail) tile.rail = true;
+          if (mt.signal && tile.rail && !tile.road) tile.signal = true;
+          if (mt.depot) tile.depot = mt.depot;
+          if (mt.stationId) tile.stationId = mt.stationId;
+          if (mt.hqOwnerId) {
+            tile.hqOwnerId = peerId;
+            tile.hqOwnerTier = mt.hqOwnerTier ?? (peer.hqTier || 1);
+          }
+          if (!tile.ownerId) {
+            tile.ownerId = peerId;
+          }
+        }
+      }
+
+      if (
+        peer.hqTile &&
+        inBounds(peer.hqTile.x, peer.hqTile.y, this.state.mapSize)
+      ) {
+        const hqIdx = tileIndex(peer.hqTile.x, peer.hqTile.y, this.state.mapSize);
+        const hqT = this.state.tiles[hqIdx];
+        if (hqT.ownerId !== 'player' && hqT.hqOwnerId !== 'player') {
+          backupTileIfNeeded(hqIdx);
+          if (hqT.terrain !== 'WATER') hqT.terrain = 'GRASS';
+          hqT.hqOwnerId = peerId;
+          hqT.hqOwnerTier = peer.hqTier || 1;
+          if (!hqT.ownerId) hqT.ownerId = peerId;
+        }
+      }
+
+      for (const rawSt of peer.stations) {
+        if (!rawSt || !rawSt.id || !inBounds(rawSt.x, rawSt.y, this.state.mapSize)) {
+          continue;
+        }
+        if (this.state.stations.some((s) => s.id === rawSt.id)) continue;
+        const stTiles =
+          Array.isArray(rawSt.tiles) && rawSt.tiles.length > 0
+            ? rawSt.tiles
+            : [{ x: rawSt.x, y: rawSt.y }];
+        const normalizedStation: Station = {
+          id: rawSt.id,
+          name: rawSt.name || `${peer.companyName} Stasjon`,
+          ownerId: peerId,
+          kind: rawSt.kind || 'BUS_STOP',
+          x: rawSt.x,
+          y: rawSt.y,
+          tiles: stTiles,
+          townId: rawSt.townId ?? null,
+          nearbyIndustryIds: Array.isArray(rawSt.nearbyIndustryIds)
+            ? rawSt.nearbyIndustryIds
+            : [],
+          waitingCargo: {
+            ...createEmptyCargoRecord(),
+            ...(rawSt.waitingCargo ?? {}),
+          },
+          ratings: {
+            ...createInitialRatingsRecord(),
+            ...(rawSt.ratings ?? {}),
+          },
+          daysSincePickup: rawSt.daysSincePickup ?? 0,
+          lastVehicleMaxSpeedKmh: rawSt.lastVehicleMaxSpeedKmh ?? 88,
+        };
+        this.state.stations.push(normalizedStation);
+      }
+
+      for (const rawVeh of peer.vehicles) {
+        if (
+          !rawVeh ||
+          !rawVeh.id ||
+          !inBounds(Math.round(rawVeh.x), Math.round(rawVeh.y), this.state.mapSize)
+        ) {
+          continue;
+        }
+        if (this.state.vehicles.some((v) => v.id === rawVeh.id)) continue;
+        const normalizedVehicle: Vehicle = {
+          ...rawVeh,
+          ownerId: peerId,
+          orders: Array.isArray(rawVeh.orders) ? rawVeh.orders : [],
+          path: Array.isArray(rawVeh.path) ? rawVeh.path : [],
+          trail:
+            Array.isArray(rawVeh.trail) && rawVeh.trail.length > 0
+              ? rawVeh.trail
+              : [{ x: rawVeh.x, y: rawVeh.y }],
+        };
+        this.state.vehicles.push(normalizedVehicle);
+      }
+    }
+
+    this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
     this.emit();
   }
 
@@ -1754,7 +2595,17 @@ export class GameEngine {
   // ============================================================================
 
   public spawnDemoRoute(type: DemoRouteType): ActionResult {
-    const built = buildConnectedRoute(this.state, 'player', type, true);
+    const idPrefix =
+      this.localIdentity && this.localIdentity.clientId !== 'player'
+        ? this.localIdentity.clientId
+        : '';
+    const built = buildConnectedRoute(
+      this.state,
+      'player',
+      type,
+      true,
+      idPrefix
+    );
     if (!built.ok) {
       return { ok: false, message: built.description };
     }
@@ -1832,11 +2683,41 @@ export class GameEngine {
   }
 
   public resetNewGame(
-    scenario: ScenarioType = 'standard',
-    mapSize = 64
+    setupOrScenario: ScenarioType | Partial<WorldSetupConfig> = 'standard',
+    mapSize?: number
   ): void {
-    this.seed = (this.seed + 7919) >>> 0;
-    this.state = this.buildFreshState(scenario, mapSize);
+    if (typeof setupOrScenario === 'object' && setupOrScenario !== null) {
+      const hasExplicitSeed = typeof setupOrScenario.seed === 'number';
+      if (!hasExplicitSeed) {
+        this.seed = (this.seed + 7919) >>> 0;
+      } else {
+        this.seed = setupOrScenario.seed!;
+      }
+      this.worldSetup = resolveWorldSetup(
+        setupOrScenario,
+        setupOrScenario.scenario,
+        setupOrScenario.mapSize ?? mapSize,
+        this.seed
+      );
+      this.state = this.buildFreshState(
+        this.worldSetup,
+        setupOrScenario.mapSize ?? mapSize
+      );
+    } else {
+      this.seed = (this.seed + 7919) >>> 0;
+      const targetSize = mapSize ?? 64;
+      this.worldSetup = resolveWorldSetup(
+        {
+          scenario: setupOrScenario,
+          mapSize: normalizeMapSizeOption(targetSize),
+          seed: this.seed,
+        },
+        setupOrScenario,
+        targetSize,
+        this.seed
+      );
+      this.state = this.buildFreshState(this.worldSetup, targetSize);
+    }
     this.emit();
   }
 
@@ -1844,7 +2725,8 @@ export class GameEngine {
     return formatGameDate(
       this.state.date.day,
       this.state.date.month,
-      this.state.date.year
+      this.state.date.year,
+      this.state.date.calendarYear
     );
   }
 }

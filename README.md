@@ -6,26 +6,24 @@ Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / Open
 - **GitHub Repository**: [https://github.com/hanselaa-code/transport-tycoon-classroom](https://github.com/hanselaa-code/transport-tycoon-classroom)
 
 ## Nøkkelfunksjoner
+- **Start-lobby, Lærerpanel (Google Auth) & Flerspiller-verdener**:
+  - **Obligatorisk inngangsport**: Elever starter med **4-sifret PIN-kode + Spillnavn + Selskapsnavn**, mens lærer/administrator logger inn med Google (`hanselaa@gmail.com`).
+  - **Komplett OpenTTD Verdensoppsett**: Lærer velger kartstørrelse (`64×64`, `96×96`, `128×128`, `160×160`), **Enkeltspiller** (hver elev i egen verden) eller **Flerspiller** (`2–8` elever per delt verden med automatisk fordeling til *Verden 1*, *Verden 2* osv.), AI-konkurrenter på/av (`0–3`), terrengtype, vannmengde/fjorder, by-/industritetthet, startår og tidsgrense (`30`/`45`/`60` min eller ubegrenset).
+- **Vei- og Jernbanebruer over vann (`Veibru` 12 000 kr/rute • `Jernbanebru` 18 000 kr/rute)**:
+  - 3D betongpilarer, bjelkebru for vei og klassisk rød OpenTTD fagverksbru i stål for jernbane med jevne landkar-ramper på begge bredder.
 - **Detaljert OpenTTD / OpenGFX 3D Isometrisk Grafikk** (`Three.js` `OrthographicCamera` + `PCFSoftShadowMap`):
   - Kontinuerlig vanntett terrengmesh med prosedyrisk pikselkunst (`NearestFilter`), steinete klippeskråninger, bølgeteksturer med brenning langs kysten, flersjikts bartrær/løvtrær, planoverganger med blinkende varsellys, buede jernbaneskinner og isometriske solskygger.
-  - **15 bybygnings-arketyper (Nivå 1–3)** med saltak, valmtak og mansardtak, norsk trepanel/murstein/fasadetekstur, samt **6 animerte industrianlegg** (roterende heishjul i kullgruve, kjøletårndamp i kraftverk, sagbruk med portalkran, skogbruk, gård med kornsiloer og matfabrikk).
-  - **Detaljerte norske lokomotiver, vogner og lastebiler**: *NSB Type 26* damplok med bevegelige drivstenger og kulltender, *NSB Di 3 Nohab* diesellok, *NSB El 18* hurtigtog med strømavtaker, samt 7 spesialiserte vogn- og lastebiltyper som gradvis fylles visuelt med kull, korn, tømmerstokker og ISO-containere.
-- **Autentisk OpenTTD Transportøkonomi & Tempo**:
-  - Realistiske TTD-hastigheter (`56 km/h` buss, `54 km/h` lastebil, `88–175 km/h` lokomotiver), gradvis lasting på stasjoner med synlige ventende passasjerer og varer på perrongen, **`Full last`**-ordrevalg, blokksignaler på jernbane, dedikert **stasjonsvindu** med selvforklarende kundetilfredshet/markedsandel (for både egne og konkurrenters stasjoner/kjøretøy) og klassisk **`[?]` Landinformasjon**-verktøy.
-  - Kalibrerte OpenTTD C++-fraktformler (`_default_cargo`) med avstandsbetaling, tidsforfall (`days1`/`days2`) og stigningsmotstand.
-- **Delt økonomi (Selskap AS vs. Privatøkonomi)**:
-  - Selskapet starter med `2 000 000 kr` i kontanter og lån (justerbart i trinn på `100 000 kr`), likviditetsvarsel ved negativ kassebeholdning og resultatregnskap (P&L).
-  - Månedlig eierlønn trekker bruttolønn + `14,1 %` arbeidsgiveravgift fra selskapet, beregner progressiv personskatt (`20 %` / `30 %` / `42 %`) og utbetaler nettolønn til eierens privatkonto.
-  - Oppgradering av hovedkontor (**HQ Nivå 1–5**) finansieres utelukkende med **private midler**, gir `-0,5 %` lavere lånerente per nivå og `+5 %` bonus på stasjonsvurdering i nærheten.
-- **Tidsstyrte AI-konkurrenter & Aksjebørs**: *Nordic Rail & Cargo* (måned 12), *FjordExpress AS* (måned 24) og *Sørlandet Transport* (måned 36) bygger ruter og børsnoteres. Elever kan kjøpe og selge aksjeposter på `10 %` (opptil `75 %`) med private midler og motta kvartalsvise utbytter.
-- **Klasseromsmodus (Firebase Firestore)**: Sanntids ledertavle for lærer/projektor med 4-sifret PIN-kode uten krav om elevinnlogging.
+  - **15 bybygnings-arketyper (Nivå 1–3)** med saltak, valmtak og mansardtak, samt **6 animerte industrianlegg** og **detaljerte norske lokomotiver (*NSB Type 26*, *Di 3 Nohab*, *El 18*), vogner og lastebiler**.
+- **Autentisk OpenTTD Transportøkonomi & Delt Økonomi (Selskap AS vs. Privatøkonomi)**:
+  - Realistiske TTD-hastigheter, gradvis lasting på stasjoner, **`Full last`**-ordrevalg, blokksignaler, dedikert **stasjonsvindu** med selvforklarende kundetilfredshet/markedsandel og klassisk **`[?]` Landinformasjon**-verktøy.
+  - Selskapslån (`2 000 000 kr` start), resultatregnskap (P&L), månedlig eierlønn med `14,1 %` arbeidsgiveravgift og progressiv personskatt (`20 %` / `30 %` / `42 %`), samt **HQ Nivå 1–5** og **aksjebørs** finansiert med private midler.
 
 ## Utvikling, Verifisering og Bygging
 
 ```bash
 npm install
 npm run dev      # Start lokal utviklingsserver (Vite)
-npm run verify   # Kjør hodeløs simulerings-, høydefelts- og 3D-rendererverifisering (42 489 sjekker)
+npm run verify   # Kjør hodeløs simulerings-, bru-, flerspiller- og 3D-verifisering (42 609 sjekker)
 npm run build    # TypeScript-sjekk og produksjonsbygg (tsc -b && vite build)
 ```
 

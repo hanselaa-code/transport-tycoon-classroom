@@ -119,6 +119,16 @@ export const StockMarketWindow: React.FC<StockMarketWindowProps> = ({
       )}
 
       {/* AI Competitors List */}
+      {aiCompanies.length === 0 ? (
+        <div className="ttd-panel p-4 text-center space-y-1.5">
+          <div className="font-bold text-amber-200 text-xs">
+            AI-konkurrenter er skrudd av i dette spillet.
+          </div>
+          <div className="text-[11px] text-slate-300">
+            Læreren har satt opp denne verdenen uten datastyrte børs-konkurrenter. I flerspillermodus konkurrerer dere direkte mot de andre elevene i samme verden!
+          </div>
+        </div>
+      ) : (
       <div className="space-y-2">
         {aiCompanies.map((ai) => {
           const monthsUntilIpo = Math.max(0, ai.spawnMonth - date.totalMonths);
@@ -274,6 +284,7 @@ export const StockMarketWindow: React.FC<StockMarketWindowProps> = ({
           );
         })}
       </div>
+      )}
     </TTDWindow>
   );
 };

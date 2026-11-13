@@ -1,16 +1,35 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RotateCcw, X, Sparkles } from 'lucide-react';
-import type { GameSpeed, GameState, ScenarioType, Tile, ToolType } from './types/game';
+import type {
+  GameSpeed,
+  GameState,
+  RemotePlayerWorldSlice,
+  ScenarioType,
+  Tile,
+  ToolType,
+  WorldSetupConfig,
+} from './types/game';
 import { GameEngine } from './core';
 import { IsometricViewport } from './renderer';
 import {
+  ADMIN_TEACHER_EMAIL,
+  signInTeacherWithGoogle,
+  signOutTeacher,
+  subscribeToTeacherAuth,
+  type TeacherUser,
+} from './firebase/auth';
+import {
   createClassroomSession,
-  joinClassroomSession,
+  joinClassroomWithWorldAssignment,
   pushStudentTelemetry,
   subscribeToClassroom,
   type ClassroomSession,
   type StudentTelemetry,
 } from './firebase/classroom';
+import {
+  publishPlayerWorldSlice,
+  subscribeToWorldPeers,
+} from './firebase/multiplayer';
+import { StartLobbyScreen } from './ui/StartLobbyScreen';
 import { TopToolbar, type WindowId } from './ui/TopToolbar';
 import { BottomStatusBar } from './ui/BottomStatusBar';
 import { ConstructionPalette } from './ui/ConstructionPalette';
@@ -29,9 +48,11 @@ import { SaveLoadWindow } from './ui/windows/SaveLoadWindow';
 import { QuickTestWindow } from './ui/windows/QuickTestWindow';
 import { LandInfoWindow } from './ui/windows/LandInfoWindow';
 import { StationDetailWindow } from './ui/windows/StationDetailWindow';
-import { formatGameDate } from './ui/formatters';
 
 const STUDENT_ID_KEY = 'tt_classroom_student_id_v1';
+const LAST_PIN_FORM_KEY = 'tt_last_pin_form_v1';
+
+type ActivePlayMode = 'student_pin' | 'teacher_pin' | 'teacher_solo' | null;
 
 function getOrCreateStudentId(): string {
   try {
@@ -42,6 +63,40 @@ function getOrCreateStudentId(): string {
     return created;
   } catch {
     return `elev-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+function loadSavedPinForm(): {
+  pin: string;
+  playerName: string;
+  companyName: string;
+} {
+  try {
+    const raw = window.sessionStorage.getItem(LAST_PIN_FORM_KEY);
+    if (!raw) return { pin: '', playerName: '', companyName: '' };
+    const parsed = JSON.parse(raw) as {
+      pin?: string;
+      playerName?: string;
+      companyName?: string;
+    };
+    return {
+      pin: parsed.pin ?? '',
+      playerName: parsed.playerName ?? '',
+      companyName: parsed.companyName ?? '',
+    };
+  } catch {
+    return { pin: '', playerName: '', companyName: '' };
+  }
+}
+
+function savePinForm(pin: string, playerName: string, companyName: string): void {
+  try {
+    window.sessionStorage.setItem(
+      LAST_PIN_FORM_KEY,
+      JSON.stringify({ pin, playerName, companyName })
+    );
+  } catch {
+    // ignore storage errors
   }
 }
 
@@ -57,25 +112,18 @@ function computeOperatingAnnualProfit(s: GameState): number {
 }
 
 export const App: React.FC = () => {
-  // Initialize GameEngine once and auto-load saved game if present
   const initBundle = useMemo(() => {
     const eng = new GameEngine();
-    let loadedSave = false;
-    try {
-      if (eng.hasSavedGame()) {
-        loadedSave = eng.loadFromLocalStorage();
-      }
-    } catch {
-      loadedSave = false;
-    }
-    return { engine: eng, loadedSave, initialState: eng.getState() };
+    return { engine: eng, initialState: eng.getState(), savedForm: loadSavedPinForm() };
   }, []);
 
   const engine = initBundle.engine;
   const [state, setState] = useState<GameState>(initBundle.initialState);
-  const [showResumeBanner, setShowResumeBanner] = useState<boolean>(
-    initBundle.loadedSave
-  );
+
+  // Auth & Entry Gate State
+  const [teacherUser, setTeacherUser] = useState<TeacherUser | null>(null);
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [activePlayMode, setActivePlayMode] = useState<ActivePlayMode>(null);
 
   // Viewport & Tool state
   const [activeTool, setActiveTool] = useState<ToolType>('SELECT');
@@ -98,11 +146,9 @@ export const App: React.FC = () => {
 
   // Window manager state (open windows + zIndex stacking order)
   const [openWindows, setOpenWindows] = useState<Set<WindowId>>(
-    () => new Set<WindowId>(initBundle.loadedSave ? [] : ['quick_test'])
+    () => new Set<WindowId>(['quick_test'])
   );
-  const [windowOrder, setWindowOrder] = useState<WindowId[]>(
-    () => (initBundle.loadedSave ? [] : ['quick_test'])
-  );
+  const [windowOrder, setWindowOrder] = useState<WindowId[]>(['quick_test']);
 
   // Depot / Vehicle / Station selection state
   const [selectedDepot, setSelectedDepot] = useState<DepotSelection | null>(null);
@@ -115,8 +161,10 @@ export const App: React.FC = () => {
     string | null
   >(null);
 
-  // Classroom Live Session & Telemetry state
+  // Classroom Live Session, World Bucket & Telemetry state
   const studentIdRef = useRef<string>(getOrCreateStudentId());
+  const initializedTeacherWorldRef = useRef<string | null>(null);
+
   const [classroomRole, setClassroomRole] = useState<'student' | 'teacher' | null>(
     null
   );
@@ -125,6 +173,15 @@ export const App: React.FC = () => {
   const [classroomStudents, setClassroomStudents] = useState<StudentTelemetry[]>(
     []
   );
+  const [assignedWorldIndex, setAssignedWorldIndex] = useState<number | null>(
+    null
+  );
+  const [assignedSlotInWorld, setAssignedSlotInWorld] = useState<number | null>(
+    null
+  );
+  const [assignedPlayerColor, setAssignedPlayerColor] = useState<string | null>(
+    null
+  );
   const [classroomRemainingSec, setClassroomRemainingSec] = useState<
     number | null
   >(null);
@@ -132,13 +189,58 @@ export const App: React.FC = () => {
     null
   );
 
-  // Engine subscription & game loop lifecycle
+  const isTeacherAdmin = Boolean(
+    teacherUser && teacherUser.email.toLowerCase() === ADMIN_TEACHER_EMAIL
+  );
+
+  // Subscribe to Firebase Teacher Auth
+  useEffect(() => {
+    const unsub = subscribeToTeacherAuth((user, ready) => {
+      setTeacherUser(user);
+      setAuthReady(ready);
+    });
+    return () => unsub();
+  }, []);
+
+  // Enforce entry gate if teacher logs out while in teacher play mode
+  useEffect(() => {
+    if (
+      authReady &&
+      !isTeacherAdmin &&
+      (activePlayMode === 'teacher_solo' || activePlayMode === 'teacher_pin')
+    ) {
+      setActivePlayMode(null);
+    }
+  }, [authReady, isTeacherAdmin, activePlayMode]);
+
+  // Engine state subscription
   useEffect(() => {
     const unsub = engine.subscribe((next) => {
       setState({ ...next });
     });
-    engine.startLoop();
+    return () => {
+      engine.stopLoop();
+      unsub();
+    };
+  }, [engine]);
 
+  // Run simulation loop ONLY when inside active gameplay
+  const isInActiveGameplay =
+    (activePlayMode === 'student_pin' && Boolean(classroomSession)) ||
+    ((activePlayMode === 'teacher_pin' || activePlayMode === 'teacher_solo') &&
+      isTeacherAdmin);
+
+  useEffect(() => {
+    if (isInActiveGameplay) {
+      engine.startLoop();
+    } else {
+      engine.stopLoop();
+    }
+  }, [engine, isInActiveGameplay]);
+
+  // Save on beforeunload when in gameplay
+  useEffect(() => {
+    if (!isInActiveGameplay) return;
     const handleBeforeUnload = () => {
       try {
         engine.saveToLocalStorage();
@@ -147,13 +249,8 @@ export const App: React.FC = () => {
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      engine.stopLoop();
-      unsub();
-    };
-  }, [engine]);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [engine, isInActiveGameplay]);
 
   // Auto-exit PLACE_HQ tool once HQ is placed
   useEffect(() => {
@@ -187,6 +284,7 @@ export const App: React.FC = () => {
     if (wid === 'rail_palette') {
       setActiveTool((cur) =>
         cur === 'RAIL' ||
+        cur === 'RAIL_BRIDGE' ||
         cur === 'RAIL_DEPOT' ||
         cur === 'TRAIN_STATION' ||
         cur === 'SIGNAL'
@@ -197,6 +295,7 @@ export const App: React.FC = () => {
     if (wid === 'road_palette') {
       setActiveTool((cur) =>
         cur === 'ROAD' ||
+        cur === 'ROAD_BRIDGE' ||
         cur === 'ROAD_DEPOT' ||
         cur === 'BUS_STOP' ||
         cur === 'TRUCK_BAY'
@@ -206,21 +305,18 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const toggleWindow = useCallback(
-    (id: WindowId) => {
-      setOpenWindows((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else {
-          next.add(id);
-          setWindowOrder((ord) => [...ord.filter((w) => w !== id), id]);
-        }
-        return next;
-      });
-    },
-    []
-  );
+  const toggleWindow = useCallback((id: WindowId) => {
+    setOpenWindows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        setWindowOrder((ord) => [...ord.filter((w) => w !== id), id]);
+      }
+      return next;
+    });
+  }, []);
 
   const getZIndex = (id: WindowId): number => {
     const idx = windowOrder.indexOf(id);
@@ -270,7 +366,8 @@ export const App: React.FC = () => {
     (x: number, y: number, tile: Tile) => {
       if (
         (activeTool === 'ROAD_DEPOT' || activeTool === 'RAIL_DEPOT') &&
-        (tile.depot === 'ROAD' || tile.depot === 'RAIL')
+        (tile.depot === 'ROAD' || tile.depot === 'RAIL') &&
+        (!tile.ownerId || tile.ownerId === 'player')
       ) {
         setActiveTool('SELECT');
         setSelectedDepot({ x, y, depotType: tile.depot });
@@ -285,7 +382,6 @@ export const App: React.FC = () => {
           st.tiles.some((t) => t.x === x && t.y === y)
         );
         if (placed && placed.tiles.length < stationLength) {
-          // Prefer expanding along adjacent rail axis if present, else +X
           const hasRailY =
             curState.tiles.some(
               (t) => t.x === x && (t.y === y - 1 || t.y === y + 1) && t.rail
@@ -302,7 +398,6 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Classic TTD Land Area Information popup in SELECT / [?] inspect mode
       if (activeTool === 'SELECT') {
         const isStationOrDepot =
           Boolean(tile.stationId) ||
@@ -394,7 +489,11 @@ export const App: React.FC = () => {
   }, [classroomSession?.pin]);
 
   useEffect(() => {
-    if (!classroomSession) {
+    if (
+      !classroomSession ||
+      classroomSession.durationMinutes === 0 ||
+      classroomSession.endsAt === 0
+    ) {
       setClassroomRemainingSec(null);
       return;
     }
@@ -412,7 +511,14 @@ export const App: React.FC = () => {
 
   // Push student telemetry helper
   const pushCurrentTelemetry = useCallback(
-    async (pin: string, studentNameOverride?: string, companyNameOverride?: string) => {
+    async (
+      pin: string,
+      worldIdx: number,
+      slotIdx: number,
+      pColor: string,
+      studentNameOverride?: string,
+      companyNameOverride?: string
+    ) => {
       const snap = engine.getState();
       const payload: StudentTelemetry = {
         studentId: studentIdRef.current,
@@ -424,6 +530,9 @@ export const App: React.FC = () => {
         totalTaxPaid: snap.personal.lifetimeTaxPaid,
         annualProfit: computeOperatingAnnualProfit(snap),
         updatedAt: Date.now(),
+        worldIndex: worldIdx,
+        slotInWorld: slotIdx,
+        playerColor: pColor,
       };
       await pushStudentTelemetry(pin, payload);
       setLastTelemetrySentAt(Date.now());
@@ -436,59 +545,318 @@ export const App: React.FC = () => {
     const pin = classroomSession?.pin;
     if (classroomRole !== 'student' || !pin) return;
 
+    const wIdx = assignedWorldIndex ?? 1;
+    const sIdx = assignedSlotInWorld ?? 1;
+    const pCol = assignedPlayerColor ?? '#2563eb';
+
     const intervalId = window.setInterval(() => {
-      void pushCurrentTelemetry(pin);
+      void pushCurrentTelemetry(pin, wIdx, sIdx, pCol);
     }, 30_000);
 
     return () => window.clearInterval(intervalId);
-  }, [classroomRole, classroomSession?.pin, pushCurrentTelemetry]);
+  }, [
+    classroomRole,
+    classroomSession?.pin,
+    assignedWorldIndex,
+    assignedSlotInWorld,
+    assignedPlayerColor,
+    pushCurrentTelemetry,
+  ]);
 
+  // Real-Time Multiplayer Shared-World Sync (Peers in same Verden #N)
+  useEffect(() => {
+    const pin = classroomSession?.pin;
+    const isMultiplayer =
+      classroomSession?.worldSetup?.gameMode === 'multiplayer';
+    if (!isInActiveGameplay || !pin || !isMultiplayer || !assignedWorldIndex) {
+      return;
+    }
+
+    const selfClientId =
+      classroomRole === 'teacher'
+        ? `teacher-${studentIdRef.current}`
+        : studentIdRef.current;
+
+    const unsubPeers = subscribeToWorldPeers(
+      pin,
+      assignedWorldIndex,
+      selfClientId,
+      (peers) => {
+        engine.syncMultiplayerPeers(peers as RemotePlayerWorldSlice[]);
+      }
+    );
+
+    const publishNow = () => {
+      const slice = engine.exportMultiplayerSlice();
+      // Teachers observing passively only publish if they actually placed infrastructure/vehicles
+      if (
+        classroomRole === 'teacher' &&
+        slice.modifiedTiles.length === 0 &&
+        slice.stations.length === 0 &&
+        slice.vehicles.length === 0 &&
+        !slice.hqTile
+      ) {
+        return;
+      }
+      void publishPlayerWorldSlice(pin, assignedWorldIndex, selfClientId, slice);
+    };
+
+    publishNow();
+    const intervalId = window.setInterval(publishNow, 2500);
+
+    return () => {
+      window.clearInterval(intervalId);
+      unsubPeers();
+      engine.syncMultiplayerPeers([]);
+    };
+  }, [
+    engine,
+    isInActiveGameplay,
+    classroomSession?.pin,
+    classroomSession?.worldSetup?.gameMode,
+    assignedWorldIndex,
+    classroomRole,
+  ]);
+
+  // Immediate debounced publish when player builds roads/rails/bridges/stations/vehicles in multiplayer
+  useEffect(() => {
+    const pin = classroomSession?.pin;
+    const isMultiplayer =
+      classroomSession?.worldSetup?.gameMode === 'multiplayer';
+    if (!isInActiveGameplay || !pin || !isMultiplayer || !assignedWorldIndex) {
+      return;
+    }
+
+    const selfClientId =
+      classroomRole === 'teacher'
+        ? `teacher-${studentIdRef.current}`
+        : studentIdRef.current;
+
+    const timerId = window.setTimeout(() => {
+      const slice = engine.exportMultiplayerSlice();
+      if (
+        classroomRole === 'teacher' &&
+        slice.modifiedTiles.length === 0 &&
+        slice.stations.length === 0 &&
+        slice.vehicles.length === 0 &&
+        !slice.hqTile
+      ) {
+        return;
+      }
+      void publishPlayerWorldSlice(pin, assignedWorldIndex, selfClientId, slice);
+    }, 350);
+
+    return () => window.clearTimeout(timerId);
+  }, [
+    engine,
+    isInActiveGameplay,
+    classroomSession?.pin,
+    classroomSession?.worldSetup?.gameMode,
+    assignedWorldIndex,
+    classroomRole,
+    state.networkRevision,
+    state.stations.length,
+    state.vehicles.length,
+  ]);
+
+  // Student Join with PIN + World Bucket Assignment
   const handleStudentJoin = useCallback(
     async (pin: string, studentName: string, companyName: string) => {
-      const found = await joinClassroomSession(pin);
-      if (!found) {
+      const res = await joinClassroomWithWorldAssignment(
+        pin,
+        studentIdRef.current,
+        studentName,
+        companyName
+      );
+      if (!res.ok || !res.session) {
         return {
           ok: false,
-          message: `Fant ingen aktiv klasseroms-økt med PIN ${pin}. Sjekk koden på tavla!`,
+          message:
+            res.error ??
+            `Fant ingen aktiv klasseroms-økt med PIN ${pin}. Sjekk koden på tavla!`,
         };
       }
-      engine.renameCompanyAndOwner(companyName, studentName);
+
+      const wIdx = res.worldIndex ?? 1;
+      const sIdx = res.slotInWorld ?? 1;
+      const pCol = res.playerColor ?? '#2563eb';
+      const cleanName = studentName.trim();
+      const cleanCompany = companyName.trim() || `${cleanName} AS`;
+
+      savePinForm(res.session.pin, cleanName, cleanCompany);
+
+      engine.resetNewGame(res.session.worldSetup);
+      engine.setLocalPlayerIdentity({
+        clientId: studentIdRef.current,
+        ownerName: cleanName,
+        companyName: cleanCompany,
+        playerColor: pCol,
+      });
+
       setClassroomRole('student');
-      setClassroomSession(found);
-      await pushCurrentTelemetry(found.pin, studentName, companyName);
+      setClassroomSession(res.session);
+      setAssignedWorldIndex(wIdx);
+      setAssignedSlotInWorld(sIdx);
+      setAssignedPlayerColor(pCol);
+      setSelectedDepot(null);
+      setSelectedVehicleId(null);
+      setSelectedStationId(null);
+      setOpenWindows(new Set<WindowId>(['quick_test']));
+      setWindowOrder(['quick_test']);
+      setActivePlayMode('student_pin');
+
+      await pushCurrentTelemetry(
+        res.session.pin,
+        wIdx,
+        sIdx,
+        pCol,
+        cleanName,
+        cleanCompany
+      );
+
       return {
         ok: true,
-        message: `Tilkoblet klasserom PIN ${found.pin}! Dine nøkkeltall er nå synlige på ledertavlen.`,
+        message: `Tilkoblet PIN ${res.session.pin} • Verden #${wIdx}!`,
       };
     },
     [engine, pushCurrentTelemetry]
   );
 
-  const handleTeacherCreate = useCallback(
-    async (durationMinutes: 30 | 45, scenario: ScenarioType) => {
-      const created = await createClassroomSession(durationMinutes, scenario);
-      setClassroomRole('teacher');
-      setClassroomSession(created);
-      return {
-        ok: true,
-        message: `Opprettet klasseroms-økt med PIN ${created.pin} (${durationMinutes} min)!`,
-      };
+  // Teacher Create Classroom PIN Session (from Lobby or in-game ClassroomWindow)
+  const handleCreateClassroomPinSession = useCallback(
+    async (durationMinutes: number, setupOrScenario: WorldSetupConfig | ScenarioType) => {
+      try {
+        const created = await createClassroomSession(
+          durationMinutes,
+          setupOrScenario
+        );
+        initializedTeacherWorldRef.current = null;
+        setClassroomRole('teacher');
+        setClassroomSession(created);
+        setAssignedWorldIndex(1);
+        setAssignedSlotInWorld(1);
+        setAssignedPlayerColor('#eab308');
+        return {
+          ok: true,
+          message: `Opprettet klasseroms-økt med PIN ${created.pin}!`,
+        };
+      } catch (err: unknown) {
+        return {
+          ok: false,
+          message:
+            (err as { message?: string })?.message ??
+            'Kunne ikke opprette klasseroms-økt.',
+        };
+      }
     },
     []
   );
 
+  // Teacher Enter 3D World of Active PIN Session (to inspect/play Verden #N)
+  const handleEnterTeacherSessionWorld = useCallback(
+    (worldIndex: number) => {
+      if (!classroomSession || !isTeacherAdmin) return;
+      const worldKey = `${classroomSession.pin}:seed-${classroomSession.worldSetup.seed}`;
+      if (initializedTeacherWorldRef.current !== worldKey) {
+        engine.resetNewGame(classroomSession.worldSetup);
+        engine.setLocalPlayerIdentity({
+          clientId: `teacher-${studentIdRef.current}`,
+          ownerName: teacherUser?.displayName || 'Lærer',
+          companyName: 'Lærer Transport AS',
+          playerColor: '#eab308',
+        });
+        initializedTeacherWorldRef.current = worldKey;
+      }
+      setAssignedWorldIndex(worldIndex);
+      setActivePlayMode('teacher_pin');
+    },
+    [classroomSession, isTeacherAdmin, engine, teacherUser]
+  );
+
+  // Teacher Start Solo Game immediately with chosen OpenTTD WorldSetupConfig
+  const handleStartTeacherSoloGame = useCallback(
+    (worldSetup: WorldSetupConfig) => {
+      if (!isTeacherAdmin) return;
+      initializedTeacherWorldRef.current = null;
+      setClassroomRole(null);
+      setClassroomSession(null);
+      setClassroomStudents([]);
+      setAssignedWorldIndex(null);
+      setAssignedSlotInWorld(null);
+      setAssignedPlayerColor('#2563eb');
+
+      engine.resetNewGame(worldSetup);
+      engine.setLocalPlayerIdentity({
+        clientId: 'player',
+        ownerName: teacherUser?.displayName || 'Lærer',
+        companyName: 'Norsk Transport AS',
+        playerColor: '#2563eb',
+      });
+
+      setSelectedDepot(null);
+      setSelectedVehicleId(null);
+      setSelectedStationId(null);
+      setOpenWindows(new Set<WindowId>(['quick_test']));
+      setWindowOrder(['quick_test']);
+      setActivePlayMode('teacher_solo');
+    },
+    [isTeacherAdmin, engine, teacherUser]
+  );
+
   const handleClassroomDisconnect = useCallback(() => {
+    initializedTeacherWorldRef.current = null;
+    engine.syncMultiplayerPeers([]);
     setClassroomRole(null);
     setClassroomSession(null);
     setClassroomStudents([]);
+    setAssignedWorldIndex(null);
+    setAssignedSlotInWorld(null);
+    setAssignedPlayerColor(null);
     setClassroomRemainingSec(null);
+    setActivePlayMode(null);
+  }, [engine]);
+
+  const handleReturnToMainMenu = useCallback(() => {
+    setActivePlayMode(null);
   }, []);
+
+  const handleSignOutTeacherAll = useCallback(async () => {
+    await signOutTeacher();
+    handleClassroomDisconnect();
+  }, [handleClassroomDisconnect]);
 
   const playerVehicleCount = useMemo(
     () =>
       state.vehicles.filter((v) => !v.ownerId || v.ownerId === 'player').length,
     [state.vehicles]
   );
+
+  // MANDATORY CLASSIC OPENTTD START LOBBY GATE
+  if (!isInActiveGameplay) {
+    return (
+      <StartLobbyScreen
+        teacherUser={teacherUser}
+        authReady={authReady}
+        activeTeacherSession={
+          classroomRole === 'teacher' ? classroomSession : null
+        }
+        sessionStudents={classroomStudents}
+        remainingSec={classroomRemainingSec}
+        initialPin={initBundle.savedForm.pin}
+        initialPlayerName={initBundle.savedForm.playerName}
+        initialCompanyName={initBundle.savedForm.companyName}
+        onJoinWithPin={handleStudentJoin}
+        onSignInTeacher={signInTeacherWithGoogle}
+        onSignOutTeacher={handleSignOutTeacherAll}
+        onCreateClassroomPinSession={(dur, setup) =>
+          handleCreateClassroomPinSession(dur, setup)
+        }
+        onStartTeacherSoloGame={handleStartTeacherSoloGame}
+        onEnterTeacherSessionWorld={handleEnterTeacherSessionWorld}
+        onCloseTeacherSession={handleClassroomDisconnect}
+      />
+    );
+  }
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#0e171d] select-none">
@@ -518,6 +886,8 @@ export const App: React.FC = () => {
         playerVehicleCount={playerVehicleCount}
         hqTier={state.corporate.hqTier}
         connectedPin={classroomSession?.pin ?? null}
+        assignedWorldIndex={assignedWorldIndex}
+        isTeacherAdmin={isTeacherAdmin}
         classroomRemainingSec={classroomRemainingSec}
         isBankruptWarning={
           state.corporate.cash < 0 || state.corporate.isBankruptWarning
@@ -530,38 +900,6 @@ export const App: React.FC = () => {
         onToggleQueryLand={handleToggleQueryLand}
         onToggleWindow={toggleWindow}
       />
-
-      {/* Auto-load Resume Banner with "Start Fresh" button */}
-      {showResumeBanner && (
-        <div className="fixed top-11 left-1/2 -translate-x-1/2 z-[850] ttd-window px-3 py-1.5 flex items-center gap-3 text-xs">
-          <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
-          <span>
-            Lastet automatisk lagret spill (<strong>{state.corporate.companyName}</strong>,{' '}
-            {formatGameDate(state.date)}).
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              engine.resetNewGame('standard', 64);
-              engine.saveToLocalStorage();
-              setShowResumeBanner(false);
-              openWindow('quick_test');
-            }}
-            className="ttd-btn ttd-btn-brass !py-1 !px-2.5"
-          >
-            <RotateCcw className="w-3 h-3" />
-            <span>Start helt på nytt</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowResumeBanner(false)}
-            className="ttd-btn !px-1.5 !py-1"
-            title="Lukk melding"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      )}
 
       {/* Draggable TTD Windows */}
       {openWindows.has('rail_palette') && (
@@ -702,8 +1040,12 @@ export const App: React.FC = () => {
       {openWindows.has('classroom') && (
         <ClassroomWindow
           role={classroomRole}
+          isTeacherAdmin={isTeacherAdmin}
           session={classroomSession}
           students={classroomStudents}
+          assignedWorldIndex={assignedWorldIndex}
+          assignedSlotInWorld={assignedSlotInWorld}
+          playerColor={assignedPlayerColor}
           remainingSec={classroomRemainingSec}
           defaultStudentName={state.personal.ownerName}
           defaultCompanyName={state.corporate.companyName}
@@ -712,13 +1054,22 @@ export const App: React.FC = () => {
           onFocus={bringToFront}
           onClose={closeWindow}
           onStudentJoin={handleStudentJoin}
-          onTeacherCreate={handleTeacherCreate}
+          onTeacherCreate={(dur, scen) =>
+            handleCreateClassroomPinSession(dur, scen)
+          }
           onPushNow={async () => {
             if (classroomSession?.pin) {
-              await pushCurrentTelemetry(classroomSession.pin);
+              await pushCurrentTelemetry(
+                classroomSession.pin,
+                assignedWorldIndex ?? 1,
+                assignedSlotInWorld ?? 1,
+                assignedPlayerColor ?? '#2563eb'
+              );
             }
           }}
           onDisconnect={handleClassroomDisconnect}
+          onReturnToMainMenu={handleReturnToMainMenu}
+          onInspectWorld={handleEnterTeacherSessionWorld}
         />
       )}
 
@@ -726,9 +1077,17 @@ export const App: React.FC = () => {
         <SaveLoadWindow
           engine={engine}
           state={state}
+          isLockedStudentPinSession={activePlayMode === 'student_pin'}
+          teacherEmail={isTeacherAdmin ? teacherUser?.email ?? null : null}
           zIndex={getZIndex('save_load')}
           onFocus={bringToFront}
           onClose={closeWindow}
+          onReturnToMainMenu={
+            activePlayMode === 'student_pin'
+              ? handleClassroomDisconnect
+              : handleReturnToMainMenu
+          }
+          onSignOutTeacher={isTeacherAdmin ? handleSignOutTeacherAll : undefined}
         />
       )}
 

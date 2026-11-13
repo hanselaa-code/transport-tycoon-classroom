@@ -8,6 +8,7 @@ import {
   type PickedTileResult,
   formatNorwegianInt,
   getTileAt,
+  setOwnerColorStateContext,
 } from './IsoSceneManager';
 import { StructuresRenderer } from './StructuresRenderer';
 import { TerrainInstancer } from './TerrainInstancer';
@@ -31,6 +32,8 @@ const TOOL_LABELS_NO: Record<ToolType, string> = {
   SELECT: 'Inspeksjon',
   ROAD: 'Bilvei',
   RAIL: 'Jernbane',
+  ROAD_BRIDGE: 'Veibru',
+  RAIL_BRIDGE: 'Jernbanebru',
   ROAD_DEPOT: 'Bildepo / Garasje',
   RAIL_DEPOT: 'Togstall / Depo',
   BUS_STOP: 'Bussholdeplass',
@@ -40,6 +43,17 @@ const TOOL_LABELS_NO: Record<ToolType, string> = {
   BULLDOZE: 'Riving',
   PLACE_HQ: 'Bygg Hovedkontor (Privat)',
 };
+
+type DragBuildTool = 'ROAD' | 'RAIL' | 'ROAD_BRIDGE' | 'RAIL_BRIDGE';
+
+function isDragBuildTool(tool: ToolType): tool is DragBuildTool {
+  return (
+    tool === 'ROAD' ||
+    tool === 'RAIL' ||
+    tool === 'ROAD_BRIDGE' ||
+    tool === 'RAIL_BRIDGE'
+  );
+}
 
 function computeFallbackDragTiles(
   fromX: number,
@@ -224,12 +238,16 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       } else if (
         buildDragStart &&
         buildDragPreviewTiles &&
-        (cur.activeTool === 'ROAD' || cur.activeTool === 'RAIL')
+        isDragBuildTool(cur.activeTool)
       ) {
         const toolName = TOOL_LABELS_NO[cur.activeTool];
         label = `${toolName} (${buildDragPreviewTiles.length} ruter) — ${formatNorwegianInt(
           buildDragPreviewCost
         )} kr`;
+      } else if (cur.activeTool === 'ROAD_BRIDGE' || cur.activeTool === 'RAIL_BRIDGE') {
+        const cost = BUILD_COSTS?.[cur.activeTool] ?? (cur.activeTool === 'RAIL_BRIDGE' ? 18000 : 12000);
+        const toolName = TOOL_LABELS_NO[cur.activeTool];
+        label = `${toolName} — ${formatNorwegianInt(cost)} kr/vannrute (dra fra bredd til bredd)`;
       } else if (cur.activeTool !== 'SELECT') {
         const cost = BUILD_COSTS?.[cur.activeTool] ?? 0;
         const toolName = TOOL_LABELS_NO[cur.activeTool];
@@ -253,7 +271,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       if (
         !buildDragStart ||
         !hoverTile ||
-        (cur.activeTool !== 'ROAD' && cur.activeTool !== 'RAIL')
+        !isDragBuildTool(cur.activeTool)
       ) {
         buildDragPreviewTiles = null;
         buildDragPreviewCost = 0;
@@ -266,7 +284,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
           fy: number,
           tx: number,
           ty: number,
-          tool: 'ROAD' | 'RAIL'
+          tool: DragBuildTool
         ) => { tiles: Array<{ x: number; y: number }>; cost: number };
       };
 
@@ -287,8 +305,15 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
           hoverTile.x,
           hoverTile.y
         );
-        const unitCost = BUILD_COSTS?.[cur.activeTool] ?? (cur.activeTool === 'RAIL' ? 4500 : 2500);
-        buildDragPreviewCost = buildDragPreviewTiles.length * unitCost;
+        const isRailKind = cur.activeTool === 'RAIL' || cur.activeTool === 'RAIL_BRIDGE';
+        const landCost = isRailKind ? 4500 : 2500;
+        const waterCost = isRailKind ? 18000 : 12000;
+        let est = 0;
+        for (const pt of buildDragPreviewTiles) {
+          const qt = getTileAt(cur.state, pt.x, pt.y);
+          est += qt?.terrain === 'WATER' ? waterCost : landCost;
+        }
+        buildDragPreviewCost = est;
       }
     };
 
@@ -326,7 +351,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       if (ev.button === 0) {
         if (
           !cur.selectedStationOrderPicker &&
-          (cur.activeTool === 'ROAD' || cur.activeTool === 'RAIL')
+          isDragBuildTool(cur.activeTool)
         ) {
           if (hoverTile) {
             buildDragStart = { x: hoverTile.x, y: hoverTile.y };
@@ -388,12 +413,12 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         return;
       }
 
-      // Finish ROAD / RAIL drag construction
+      // Finish ROAD / RAIL / ROAD_BRIDGE / RAIL_BRIDGE drag construction
       if (
         ev.button === 0 &&
         buildDragStart &&
         !cur.selectedStationOrderPicker &&
-        (cur.activeTool === 'ROAD' || cur.activeTool === 'RAIL')
+        isDragBuildTool(cur.activeTool)
       ) {
         const endPick =
           sceneMgr.pickTileAtClientPos(ev.clientX, ev.clientY, cur.state) ?? hoverTile;
@@ -403,7 +428,15 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         buildDragPreviewCost = 0;
 
         if (endPick) {
-          const res = cur.engine.applyDragTrackOrRoad(
+          const dragFn = cur.engine.applyDragTrackOrRoad as unknown as (
+            fx: number,
+            fy: number,
+            tx: number,
+            ty: number,
+            tool: DragBuildTool
+          ) => { ok: boolean; message?: string };
+          const res = dragFn.call(
+            cur.engine,
             start.x,
             start.y,
             endPick.x,
@@ -587,6 +620,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       sceneMgr.updateCamera(dtSec);
 
       // Sync dirty-checked instanced terrain, networks, and structures
+      setOwnerColorStateContext(latestState);
       terrainInstancer.sync(latestState);
       terrainInstancer.updateWaterAnimation(timeSec);
 
@@ -635,6 +669,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onWindowBlur);
 
+      setOwnerColorStateContext(null);
       terrainInstancer.dispose();
       structuresRenderer.dispose();
       vehicleRenderer.dispose();

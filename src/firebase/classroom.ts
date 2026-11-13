@@ -3,9 +3,62 @@ import {
   doc,
   getDoc,
   onSnapshot,
+  runTransaction,
   setDoc,
 } from 'firebase/firestore';
+import { ADMIN_TEACHER_EMAIL, getCurrentTeacherUser } from './auth';
 import { db, hasValidFirebaseConfig } from './config';
+
+export interface WorldSetupConfig {
+  mapSize: 64 | 96 | 128 | 160;
+  gameMode: 'singleplayer' | 'multiplayer';
+  playersPerWorld: number; // 1 in singleplayer; 2..8 in multiplayer
+  aiEnabled: boolean;
+  maxAiCount: 0 | 1 | 2 | 3;
+  terrainType: 'flat' | 'hilly' | 'mountainous';
+  waterLevel: 'very_low' | 'low' | 'medium' | 'high';
+  townDensity: 'low' | 'normal' | 'high';
+  industryDensity: 'low' | 'normal' | 'high';
+  startYear: number;
+  scenario: 'standard' | 'boom' | 'challenge';
+  seed: number;
+}
+
+export const DEFAULT_WORLD_SETUP: WorldSetupConfig = {
+  mapSize: 64,
+  gameMode: 'singleplayer',
+  playersPerWorld: 1,
+  aiEnabled: true,
+  maxAiCount: 3,
+  terrainType: 'hilly',
+  waterLevel: 'medium',
+  townDensity: 'normal',
+  industryDensity: 'normal',
+  startYear: 1950,
+  scenario: 'standard',
+  seed: 20261112,
+};
+
+export const PLAYER_WORLD_COLORS = [
+  '#2563eb',
+  '#16a34a',
+  '#ea580c',
+  '#9333ea',
+  '#0891b2',
+  '#e11d48',
+  '#ca8a04',
+  '#4f46e5',
+] as const;
+
+export interface WorldAssignment {
+  studentId: string;
+  playerName: string;
+  companyName: string;
+  worldIndex: number;
+  slotInWorld: number;
+  playerColor: string;
+  assignedAt: number;
+}
 
 export interface StudentTelemetry {
   studentId: string;
@@ -17,15 +70,22 @@ export interface StudentTelemetry {
   totalTaxPaid: number;
   annualProfit: number;
   updatedAt: number;
+  worldIndex: number;
+  slotInWorld: number;
+  playerColor: string;
 }
 
 export interface ClassroomSession {
   pin: string;
   teacherCreatedAt: number;
-  durationMinutes: number;
+  durationMinutes: number; // 0 = unlimited timer
   endsAt: number;
   scenario: 'standard' | 'boom' | 'challenge';
   active: boolean;
+  worldSetup: WorldSetupConfig;
+  assignedCount: number;
+  assignments?: Record<string, WorldAssignment>;
+  teacherEmail?: string;
 }
 
 const PIN_REGEX = /^[0-9]{4}$/;
@@ -33,16 +93,121 @@ const FALLBACK_SESSION_PREFIX = 'tt_classroom_session_';
 const FALLBACK_STUDENTS_PREFIX = 'tt_classroom_students_';
 const FALLBACK_CHANNEL_NAME = 'tt_classroom_sync_v1';
 
+// In-memory store for headless Node/tsx tests where window.localStorage is absent
+const memorySessions = new Map<string, ClassroomSession>();
+const memoryStudents = new Map<string, Map<string, StudentTelemetry>>();
+
 function hasBrowserStorage(): boolean {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
 }
 
-function safeNumber(value: number, fallback = 0): number {
-  return Number.isFinite(value) ? value : fallback;
+function safeNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+export function normalizeWorldSetup(
+  partial?: Partial<WorldSetupConfig> | null,
+  fallbackScenario: 'standard' | 'boom' | 'challenge' = 'standard',
+): WorldSetupConfig {
+  const raw = partial || {};
+  const mapSize: 64 | 96 | 128 | 160 =
+    raw.mapSize === 96 || raw.mapSize === 128 || raw.mapSize === 160 ? raw.mapSize : 64;
+  const gameMode: 'singleplayer' | 'multiplayer' =
+    raw.gameMode === 'multiplayer' ? 'multiplayer' : 'singleplayer';
+  const rawPerWorld = Math.round(safeNumber(raw.playersPerWorld, gameMode === 'multiplayer' ? 3 : 1));
+  const playersPerWorld = gameMode === 'singleplayer' ? 1 : Math.max(2, Math.min(8, rawPerWorld));
+  const aiEnabled = typeof raw.aiEnabled === 'boolean' ? raw.aiEnabled : DEFAULT_WORLD_SETUP.aiEnabled;
+  const rawMaxAi = raw.maxAiCount;
+  const maxAiCount: 0 | 1 | 2 | 3 = !aiEnabled
+    ? 0
+    : rawMaxAi === 0 || rawMaxAi === 1 || rawMaxAi === 2 || rawMaxAi === 3
+      ? rawMaxAi
+      : 3;
+  const terrainType: 'flat' | 'hilly' | 'mountainous' =
+    raw.terrainType === 'flat' || raw.terrainType === 'mountainous' ? raw.terrainType : 'hilly';
+  const waterLevel: 'very_low' | 'low' | 'medium' | 'high' =
+    raw.waterLevel === 'very_low' ||
+    raw.waterLevel === 'low' ||
+    raw.waterLevel === 'medium' ||
+    raw.waterLevel === 'high'
+      ? raw.waterLevel
+      : 'medium';
+  const townDensity: 'low' | 'normal' | 'high' =
+    raw.townDensity === 'low' || raw.townDensity === 'high' ? raw.townDensity : 'normal';
+  const industryDensity: 'low' | 'normal' | 'high' =
+    raw.industryDensity === 'low' || raw.industryDensity === 'high'
+      ? raw.industryDensity
+      : 'normal';
+  const startYear = Math.max(1920, Math.min(2050, Math.round(safeNumber(raw.startYear, 1950))));
+  const scenario: 'standard' | 'boom' | 'challenge' =
+    raw.scenario === 'boom' || raw.scenario === 'challenge' || raw.scenario === 'standard'
+      ? raw.scenario
+      : fallbackScenario;
+  const seed = Math.max(1, Math.floor(safeNumber(raw.seed, DEFAULT_WORLD_SETUP.seed)));
+
+  return {
+    mapSize,
+    gameMode,
+    playersPerWorld,
+    aiEnabled: maxAiCount > 0 && aiEnabled,
+    maxAiCount,
+    terrainType,
+    waterLevel,
+    townDensity,
+    industryDensity,
+    startYear,
+    scenario,
+    seed,
+  };
+}
+
+export function computeWorldBucketAssignment(
+  slotIndex: number,
+  worldSetup: Pick<WorldSetupConfig, 'gameMode' | 'playersPerWorld'>,
+): {
+  worldIndex: number;
+  slotInWorld: number;
+  playerColor: string;
+} {
+  const safeSlot = Math.max(0, Math.floor(safeNumber(slotIndex, 0)));
+  const perWorld =
+    worldSetup.gameMode === 'singleplayer'
+      ? 1
+      : Math.max(1, Math.floor(safeNumber(worldSetup.playersPerWorld, 1)));
+  const worldIndex = Math.floor(safeSlot / perWorld) + 1;
+  const slotInWorld = (safeSlot % perWorld) + 1;
+  const playerColor = PLAYER_WORLD_COLORS[(slotInWorld - 1) % PLAYER_WORLD_COLORS.length];
+
+  return {
+    worldIndex,
+    slotInWorld,
+    playerColor,
+  };
+}
+
+function normalizeSession(raw: ClassroomSession): ClassroomSession {
+  const scenario: 'standard' | 'boom' | 'challenge' =
+    raw.scenario === 'boom' || raw.scenario === 'challenge' ? raw.scenario : 'standard';
+  const worldSetup = normalizeWorldSetup(raw.worldSetup, scenario);
+  const durationMinutes =
+    raw.durationMinutes <= 0 ? 0 : Math.min(480, Math.round(safeNumber(raw.durationMinutes, 45)));
+  return {
+    ...raw,
+    durationMinutes,
+    endsAt: durationMinutes === 0 ? 0 : safeNumber(raw.endsAt, raw.teacherCreatedAt + durationMinutes * 60_000),
+    scenario: worldSetup.scenario,
+    worldSetup,
+    assignedCount: Math.max(0, Math.floor(safeNumber(raw.assignedCount, 0))),
+    assignments: raw.assignments || {},
+  };
 }
 
 function sanitizeStudentTelemetry(telemetry: StudentTelemetry): StudentTelemetry {
   const cleanId = (telemetry.studentId || 'student-anon').trim().slice(0, 64) || 'student-anon';
+  const worldIndex = Math.max(1, Math.floor(safeNumber(telemetry.worldIndex, 1)));
+  const slotInWorld = Math.max(1, Math.floor(safeNumber(telemetry.slotInWorld, 1)));
+  const defaultColor = PLAYER_WORLD_COLORS[(slotInWorld - 1) % PLAYER_WORLD_COLORS.length];
+  const rawColor = (telemetry.playerColor || '').trim();
   return {
     studentId: cleanId,
     studentName: (telemetry.studentName || 'Ukjent elev').trim().slice(0, 100) || 'Ukjent elev',
@@ -53,10 +218,14 @@ function sanitizeStudentTelemetry(telemetry: StudentTelemetry): StudentTelemetry
     totalTaxPaid: safeNumber(telemetry.totalTaxPaid),
     annualProfit: safeNumber(telemetry.annualProfit),
     updatedAt: safeNumber(telemetry.updatedAt, Date.now()),
+    worldIndex,
+    slotInWorld,
+    playerColor: rawColor.length > 0 && rawColor.length <= 24 ? rawColor : defaultColor,
   };
 }
 
 function saveFallbackSession(session: ClassroomSession): void {
+  memorySessions.set(session.pin, session);
   if (!hasBrowserStorage()) return;
   try {
     window.localStorage.setItem(`${FALLBACK_SESSION_PREFIX}${session.pin}`, JSON.stringify(session));
@@ -67,16 +236,28 @@ function saveFallbackSession(session: ClassroomSession): void {
 }
 
 function loadFallbackSession(pin: string): ClassroomSession | null {
-  if (!hasBrowserStorage()) return null;
-  try {
-    const raw = window.localStorage.getItem(`${FALLBACK_SESSION_PREFIX}${pin}`);
-    return raw ? (JSON.parse(raw) as ClassroomSession) : null;
-  } catch {
-    return null;
+  if (hasBrowserStorage()) {
+    try {
+      const raw = window.localStorage.getItem(`${FALLBACK_SESSION_PREFIX}${pin}`);
+      if (raw) {
+        return normalizeSession(JSON.parse(raw) as ClassroomSession);
+      }
+    } catch {
+      // Ignore parse errors
+    }
   }
+  const mem = memorySessions.get(pin);
+  return mem ? normalizeSession(mem) : null;
 }
 
 function saveFallbackStudent(pin: string, telemetry: StudentTelemetry): void {
+  let pinMap = memoryStudents.get(pin);
+  if (!pinMap) {
+    pinMap = new Map<string, StudentTelemetry>();
+    memoryStudents.set(pin, pinMap);
+  }
+  pinMap.set(telemetry.studentId, telemetry);
+
   if (!hasBrowserStorage()) return;
   try {
     const existing = loadFallbackStudents(pin);
@@ -93,13 +274,18 @@ function saveFallbackStudent(pin: string, telemetry: StudentTelemetry): void {
 }
 
 function loadFallbackStudents(pin: string): StudentTelemetry[] {
-  if (!hasBrowserStorage()) return [];
-  try {
-    const raw = window.localStorage.getItem(`${FALLBACK_STUDENTS_PREFIX}${pin}`);
-    return raw ? (JSON.parse(raw) as StudentTelemetry[]) : [];
-  } catch {
-    return [];
+  if (hasBrowserStorage()) {
+    try {
+      const raw = window.localStorage.getItem(`${FALLBACK_STUDENTS_PREFIX}${pin}`);
+      if (raw) {
+        return (JSON.parse(raw) as StudentTelemetry[]).map(sanitizeStudentTelemetry);
+      }
+    } catch {
+      // Ignore parse errors
+    }
   }
+  const pinMap = memoryStudents.get(pin);
+  return pinMap ? Array.from(pinMap.values()).map(sanitizeStudentTelemetry) : [];
 }
 
 function notifyFallbackChannel(pin: string): void {
@@ -172,18 +358,36 @@ export function isFirebaseConfigured(): boolean {
 
 export async function createClassroomSession(
   durationMinutes: number,
-  scenario: 'standard' | 'boom' | 'challenge' = 'standard',
+  scenarioOrSetup?: 'standard' | 'boom' | 'challenge' | Partial<WorldSetupConfig>,
 ): Promise<ClassroomSession> {
-  const safeDuration = Math.max(1, Math.min(480, Math.round(safeNumber(durationMinutes, 45))));
-  const validScenario: 'standard' | 'boom' | 'challenge' =
-    scenario === 'boom' || scenario === 'challenge' ? scenario : 'standard';
+  const safeDuration =
+    durationMinutes <= 0 ? 0 : Math.min(480, Math.round(safeNumber(durationMinutes, 45)));
+
+  const now = Date.now();
+  const defaultSeed = (now % 89999999) + 10000000;
+
+  const worldSetup =
+    typeof scenarioOrSetup === 'string'
+      ? normalizeWorldSetup({ scenario: scenarioOrSetup, seed: defaultSeed }, scenarioOrSetup)
+      : normalizeWorldSetup(
+          { seed: defaultSeed, ...(scenarioOrSetup || {}) },
+          scenarioOrSetup?.scenario || 'standard',
+        );
+
+  const teacher = getCurrentTeacherUser();
+  const isBrowser = typeof window !== 'undefined';
+
+  if (isBrowser && (!teacher || teacher.email !== ADMIN_TEACHER_EMAIL)) {
+    throw new Error(
+      'Kun innlogget lærer (hanselaa@gmail.com) kan opprette nye klasseroms-økter.',
+    );
+  }
 
   let pin = generateFourDigitPin();
-  const now = Date.now();
 
-  if (db && hasValidFirebaseConfig) {
+  if (db && hasValidFirebaseConfig && teacher?.email === ADMIN_TEACHER_EMAIL) {
     try {
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < 5; attempt++) {
         const candidate = attempt === 0 ? pin : generateFourDigitPin();
         const existingSnap = await getDoc(doc(db, 'classrooms', candidate));
         if (!existingSnap.exists()) {
@@ -196,9 +400,13 @@ export async function createClassroomSession(
         pin,
         teacherCreatedAt: now,
         durationMinutes: safeDuration,
-        endsAt: now + safeDuration * 60_000,
-        scenario: validScenario,
+        endsAt: safeDuration === 0 ? 0 : now + safeDuration * 60_000,
+        scenario: worldSetup.scenario,
         active: true,
+        worldSetup,
+        assignedCount: 0,
+        assignments: {},
+        teacherEmail: teacher.email,
       };
 
       await setDoc(doc(db, 'classrooms', pin), session);
@@ -213,9 +421,13 @@ export async function createClassroomSession(
     pin,
     teacherCreatedAt: now,
     durationMinutes: safeDuration,
-    endsAt: now + safeDuration * 60_000,
-    scenario: validScenario,
+    endsAt: safeDuration === 0 ? 0 : now + safeDuration * 60_000,
+    scenario: worldSetup.scenario,
     active: true,
+    worldSetup,
+    assignedCount: 0,
+    assignments: {},
+    teacherEmail: teacher?.email || ADMIN_TEACHER_EMAIL,
   };
   saveFallbackSession(fallbackSession);
   return fallbackSession;
@@ -233,7 +445,7 @@ export async function joinClassroomSession(pin: string): Promise<ClassroomSessio
       if (!snap.exists()) {
         return loadFallbackSession(cleanPin);
       }
-      const data = snap.data() as ClassroomSession;
+      const data = normalizeSession(snap.data() as ClassroomSession);
       saveFallbackSession(data);
       return data;
     } catch (err) {
@@ -243,6 +455,263 @@ export async function joinClassroomSession(pin: string): Promise<ClassroomSessio
   }
 
   return loadFallbackSession(cleanPin);
+}
+
+function assignStudentInLocalSession(
+  localSession: ClassroomSession,
+  cleanStudentId: string,
+  cleanPlayerName: string,
+  cleanCompanyName: string,
+): {
+  session: ClassroomSession;
+  worldIndex: number;
+  slotInWorld: number;
+  playerColor: string;
+} {
+  const normalized = normalizeSession(localSession);
+  const existing = normalized.assignments?.[cleanStudentId];
+  if (existing) {
+    return {
+      session: normalized,
+      worldIndex: existing.worldIndex,
+      slotInWorld: existing.slotInWorld,
+      playerColor: existing.playerColor,
+    };
+  }
+
+  const slotIndex = normalized.assignedCount ?? 0;
+  const { worldIndex, slotInWorld, playerColor } = computeWorldBucketAssignment(
+    slotIndex,
+    normalized.worldSetup,
+  );
+  const assignment: WorldAssignment = {
+    studentId: cleanStudentId,
+    playerName: cleanPlayerName,
+    companyName: cleanCompanyName,
+    worldIndex,
+    slotInWorld,
+    playerColor,
+    assignedAt: Date.now(),
+  };
+
+  const updatedSession: ClassroomSession = {
+    ...normalized,
+    assignedCount: slotIndex + 1,
+    assignments: {
+      ...(normalized.assignments || {}),
+      [cleanStudentId]: assignment,
+    },
+  };
+  saveFallbackSession(updatedSession);
+  return {
+    session: updatedSession,
+    worldIndex,
+    slotInWorld,
+    playerColor,
+  };
+}
+
+export async function joinClassroomWithWorldAssignment(
+  pin: string,
+  studentId: string,
+  playerName: string,
+  companyName: string,
+): Promise<{
+  ok: boolean;
+  session?: ClassroomSession;
+  worldIndex?: number;
+  slotInWorld?: number;
+  playerColor?: string;
+  error?: string;
+}> {
+  const cleanPin = (pin || '').trim();
+  if (!PIN_REGEX.test(cleanPin)) {
+    return {
+      ok: false,
+      error: 'PIN-koden må bestå av nøyaktig 4 siffer.',
+    };
+  }
+
+  const cleanPlayerName = (playerName || '').trim().slice(0, 80);
+  if (!cleanPlayerName) {
+    return {
+      ok: false,
+      error: 'Skriv inn ditt spillnavn før du starter.',
+    };
+  }
+
+  const cleanCompanyName =
+    (companyName || '').trim().slice(0, 80) || `${cleanPlayerName} AS`;
+  const cleanStudentId =
+    (studentId || '').trim().slice(0, 64) || `student-${Date.now()}`;
+
+  if (db && hasValidFirebaseConfig) {
+    try {
+      const sessionRef = doc(db, 'classrooms', cleanPin);
+      const txResult = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(sessionRef);
+        if (!snap.exists()) {
+          return { status: 'not_found' as const };
+        }
+
+        const rawData = snap.data() as ClassroomSession;
+        if (rawData.active === false) {
+          return { status: 'inactive' as const };
+        }
+
+        const normalized = normalizeSession(rawData);
+        const existingAssignments = { ...(normalized.assignments || {}) };
+        const existing = existingAssignments[cleanStudentId];
+
+        if (existing) {
+          if (
+            existing.playerName !== cleanPlayerName ||
+            existing.companyName !== cleanCompanyName
+          ) {
+            const updatedExisting: WorldAssignment = {
+              ...existing,
+              playerName: cleanPlayerName,
+              companyName: cleanCompanyName,
+            };
+            const nextAssignments = {
+              ...existingAssignments,
+              [cleanStudentId]: updatedExisting,
+            };
+            tx.update(sessionRef, {
+              assignments: nextAssignments,
+            });
+            return {
+              status: 'ok' as const,
+              session: { ...normalized, assignments: nextAssignments },
+              worldIndex: updatedExisting.worldIndex,
+              slotInWorld: updatedExisting.slotInWorld,
+              playerColor: updatedExisting.playerColor,
+            };
+          }
+
+          return {
+            status: 'ok' as const,
+            session: normalized,
+            worldIndex: existing.worldIndex,
+            slotInWorld: existing.slotInWorld,
+            playerColor: existing.playerColor,
+          };
+        }
+
+        const slotIndex = normalized.assignedCount ?? 0;
+        const { worldIndex, slotInWorld, playerColor } = computeWorldBucketAssignment(
+          slotIndex,
+          normalized.worldSetup,
+        );
+        const newAssignment: WorldAssignment = {
+          studentId: cleanStudentId,
+          playerName: cleanPlayerName,
+          companyName: cleanCompanyName,
+          worldIndex,
+          slotInWorld,
+          playerColor,
+          assignedAt: Date.now(),
+        };
+
+        const nextAssignedCount = slotIndex + 1;
+        const nextAssignments = {
+          ...existingAssignments,
+          [cleanStudentId]: newAssignment,
+        };
+
+        tx.update(sessionRef, {
+          assignedCount: nextAssignedCount,
+          assignments: nextAssignments,
+        });
+
+        return {
+          status: 'ok' as const,
+          session: {
+            ...normalized,
+            assignedCount: nextAssignedCount,
+            assignments: nextAssignments,
+          },
+          worldIndex,
+          slotInWorld,
+          playerColor,
+        };
+      });
+
+      if (txResult.status === 'inactive') {
+        return {
+          ok: false,
+          error: 'Denne klasseroms-økten er avsluttet av læreren.',
+        };
+      }
+
+      if (txResult.status === 'ok') {
+        saveFallbackSession(txResult.session);
+        return {
+          ok: true,
+          session: txResult.session,
+          worldIndex: txResult.worldIndex,
+          slotInWorld: txResult.slotInWorld,
+          playerColor: txResult.playerColor,
+        };
+      }
+
+      // Check local/memory fallback if not found in Firestore (e.g. offline/headless test)
+      const local = loadFallbackSession(cleanPin);
+      if (!local) {
+        return {
+          ok: false,
+          error: `Fant ingen aktiv klasseroms-økt med PIN ${cleanPin}. Sjekk koden på tavla!`,
+        };
+      }
+      const localAssigned = assignStudentInLocalSession(
+        local,
+        cleanStudentId,
+        cleanPlayerName,
+        cleanCompanyName,
+      );
+      return {
+        ok: true,
+        ...localAssigned,
+      };
+    } catch (err) {
+      console.warn('[Classroom] Firestore joinClassroomWithWorldAssignment failed, checking local fallback:', err);
+      const local = loadFallbackSession(cleanPin);
+      if (local) {
+        const localAssigned = assignStudentInLocalSession(
+          local,
+          cleanStudentId,
+          cleanPlayerName,
+          cleanCompanyName,
+        );
+        return {
+          ok: true,
+          ...localAssigned,
+        };
+      }
+      return {
+        ok: false,
+        error: 'Kunne ikke koble til klasseroms-økten. Sjekk nettverk og PIN-kode.',
+      };
+    }
+  }
+
+  const local = loadFallbackSession(cleanPin);
+  if (!local) {
+    return {
+      ok: false,
+      error: `Fant ingen aktiv klasseroms-økt med PIN ${cleanPin}.`,
+    };
+  }
+  const localAssigned = assignStudentInLocalSession(
+    local,
+    cleanStudentId,
+    cleanPlayerName,
+    cleanCompanyName,
+  );
+  return {
+    ok: true,
+    ...localAssigned,
+  };
 }
 
 export async function pushStudentTelemetry(
@@ -315,7 +784,7 @@ export function subscribeToClassroom(
     doc(db, 'classrooms', cleanPin),
     (snap) => {
       sessionLoaded = true;
-      currentSession = snap.exists() ? (snap.data() as ClassroomSession) : null;
+      currentSession = snap.exists() ? normalizeSession(snap.data() as ClassroomSession) : null;
       if (currentSession) {
         saveFallbackSession(currentSession);
       }
@@ -330,7 +799,7 @@ export function subscribeToClassroom(
       studentsLoaded = true;
       const list: StudentTelemetry[] = [];
       snap.forEach((docSnap) => {
-        list.push(docSnap.data() as StudentTelemetry);
+        list.push(sanitizeStudentTelemetry(docSnap.data() as StudentTelemetry));
       });
       list.sort((a, b) => b.companyValue - a.companyValue);
       currentStudents = list;

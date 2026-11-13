@@ -6,6 +6,7 @@ import {
   ToolType,
   VehicleCatalogItem,
   VehicleModelId,
+  WorldSetupConfig,
 } from '../types/game';
 
 export const ALL_CARGO_TYPES: CargoType[] = [
@@ -44,10 +45,38 @@ export const COMPANY_COLORS: Record<string, string> = {
   'ai-3': '#7c3aed', // Violet (Sørlandet Transport)
 };
 
+export const MULTIPLAYER_PLAYER_COLORS: string[] = [
+  '#2563eb', // Royal Blue
+  '#16a34a', // Emerald Green
+  '#ea580c', // Tangelo Orange
+  '#9333ea', // Amethyst Purple
+  '#0891b2', // Fjord Cyan
+  '#e11d48', // Rose Red
+  '#ca8a04', // Nordic Gold
+  '#4f46e5', // Indigo
+];
+
+export const DEFAULT_WORLD_SETUP: WorldSetupConfig = {
+  mapSize: 64,
+  gameMode: 'singleplayer',
+  playersPerWorld: 1,
+  aiEnabled: true,
+  maxAiCount: 3,
+  terrainType: 'hilly',
+  waterLevel: 'medium',
+  townDensity: 'normal',
+  industryDensity: 'normal',
+  startYear: 1950,
+  scenario: 'standard',
+  seed: 20261112,
+};
+
 export const BUILD_COSTS: Record<ToolType, number> = {
   SELECT: 0,
   ROAD: 2_500,
   RAIL: 4_500,
+  ROAD_BRIDGE: 12_000,
+  RAIL_BRIDGE: 18_000,
   ROAD_DEPOT: 35_000,
   RAIL_DEPOT: 55_000,
   BUS_STOP: 25_000,
@@ -315,7 +344,15 @@ export const MONTHS_NO = [
   'des',
 ];
 
-export function formatGameDate(day: number, month: number, year: number): string {
+export function formatGameDate(
+  day: number,
+  month: number,
+  year: number,
+  calendarYear?: number
+): string {
   const monthLabel = MONTHS_NO[Math.max(0, Math.min(11, month - 1))] ?? 'jan';
+  if (typeof calendarYear === 'number' && calendarYear >= 1800) {
+    return `${day}. ${monthLabel} ${calendarYear}`;
+  }
   return `${day}. ${monthLabel} År ${year}`;
 }

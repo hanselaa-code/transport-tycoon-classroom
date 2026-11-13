@@ -76,7 +76,15 @@ export const DirectoryWindow: React.FC<DirectoryWindowProps> = ({
       return {
         isPlayer: true,
         name: state.corporate.companyName,
-        color: COMPANY_COLORS.player ?? '#2563eb',
+        color: state.corporate.playerColor ?? COMPANY_COLORS.player ?? '#2563eb',
+      };
+    }
+    const peer = state.remotePlayers?.find((p) => p.clientId === st.ownerId);
+    if (peer) {
+      return {
+        isPlayer: false,
+        name: peer.companyName || peer.ownerName,
+        color: peer.color || '#16a34a',
       };
     }
     const ai = state.aiCompanies.find((c) => c.id === st.ownerId);

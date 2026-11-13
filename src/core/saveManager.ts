@@ -37,8 +37,20 @@ export interface SaveEnvelope {
 }
 
 export function serializeGameState(state: GameState): string {
+  const remoteIds = new Set(
+    (state.remotePlayers ?? []).map((p) => p.clientId)
+  );
   const cleanState: GameState = {
     ...state,
+    stations:
+      remoteIds.size > 0
+        ? state.stations.filter((s) => !remoteIds.has(s.ownerId))
+        : state.stations,
+    vehicles:
+      remoteIds.size > 0
+        ? state.vehicles.filter((v) => !remoteIds.has(v.ownerId))
+        : state.vehicles,
+    remotePlayers: [],
     popups: [],
     lastSavedAtMs: Date.now(),
   };
@@ -92,6 +104,8 @@ export function deserializeGameState(rawJson: string): {
       aiCompanies: Array.isArray(candidate.aiCompanies) ? candidate.aiCompanies : [],
       news: Array.isArray(candidate.news) ? candidate.news : [],
       scenario: candidate.scenario ?? 'standard',
+      worldSetup: candidate.worldSetup,
+      remotePlayers: [],
       networkRevision: (candidate.networkRevision ?? 0) + 1,
       lastSavedAtMs: candidate.lastSavedAtMs ?? Date.now(),
     };

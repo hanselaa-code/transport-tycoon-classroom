@@ -86,6 +86,15 @@ export const LandInfoWindow: React.FC<LandInfoWindowProps> = ({
           <strong className="text-sky-300 text-right">{info.ownerName}</strong>
         </div>
 
+        {info.bridge && (
+          <div className="flex justify-between gap-2 border-b border-black/30 pb-1">
+            <span className="text-slate-300">Bru-konstruksjon:</span>
+            <strong className="text-cyan-300 text-right">
+              {info.bridge === 'RAIL' ? 'Jernbanebru over vann' : 'Veibru over vann'}
+            </strong>
+          </div>
+        )}
+
         {info.townName && (
           <div className="flex justify-between gap-2 border-b border-black/30 pb-1">
             <span className="text-slate-300">Lokal myndighet / By:</span>

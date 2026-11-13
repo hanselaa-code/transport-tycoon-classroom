@@ -300,9 +300,14 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
     : 0;
 
   if (rivalVehicle) {
+    const peerOwner = state.remotePlayers?.find(
+      (p) => p.clientId === rivalVehicle.ownerId
+    );
     const aiOwner = state.aiCompanies.find((a) => a.id === rivalVehicle.ownerId);
-    const ownerName = aiOwner?.name ?? 'Konkurrent AS';
+    const ownerName =
+      peerOwner?.companyName ?? aiOwner?.name ?? 'Konkurrent AS';
     const ownerColor =
+      peerOwner?.color ??
       aiOwner?.color ??
       COMPANY_COLORS[rivalVehicle.ownerId ?? 'ai-1'] ??
       '#a855f7';

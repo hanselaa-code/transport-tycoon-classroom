@@ -4,12 +4,13 @@ import type { AICompany, GameState, Tile, ToolType, Vehicle } from '../types/gam
 export const ELEV_STEP = 0.28;
 export const WATER_SURFACE_Y = 0.08;
 export const TERRAIN_BASE_Y = -0.52;
+export const BRIDGE_DECK_Y = ELEV_STEP * 1.22;
 
 // Classic Transport Tycoon isometric pitch: -atan(1 / sqrt(2)) ≈ -35.2643897 deg
 export const ISO_PITCH_RAD = -Math.atan(1 / Math.sqrt(2));
-const CAMERA_DISTANCE = 140;
+const CAMERA_DISTANCE = 220;
 const BASE_FRUSTUM_HEIGHT = 24;
-const MIN_ZOOM = 0.42;
+const MIN_ZOOM = 0.28;
 const MAX_ZOOM = 3.5;
 
 export interface TileCornerHeights {
@@ -180,11 +181,90 @@ export function getSurfaceHeightAt(
   }
 }
 
+function isBridgeNeighborAlongAxis(
+  landTile: Tile,
+  neighbor: Tile | undefined,
+  axis: 'X' | 'Y'
+): boolean {
+  if (!neighbor || (neighbor.bridge !== 'ROAD' && neighbor.bridge !== 'RAIL')) {
+    return false;
+  }
+  if (neighbor.bridgeAxis && neighbor.bridgeAxis !== axis) {
+    return false;
+  }
+  if (neighbor.bridge === 'ROAD') {
+    return Boolean(landTile.road || landTile.depot === 'ROAD' || landTile.stationId);
+  }
+  return Boolean(landTile.rail || landTile.depot === 'RAIL' || landTile.stationId);
+}
+
+/**
+ * Travel surface height for roads, railways, and vehicles (`VehicleRenderer` & QA):
+ * - On any water bridge tile (`tile.bridge === 'ROAD' || tile.bridge === 'RAIL'`), returns `BRIDGE_DECK_Y`.
+ * - On a land shore tile adjacent to a connected bridge along the bridge axis, smoothly ramps from
+ *   the land tile's center surface height to `BRIDGE_DECK_Y` at the shared water edge.
+ * - Otherwise returns `getSurfaceHeightAt(state, worldX, worldZ)`.
+ */
+export function getTravelSurfaceHeightAt(
+  state: Pick<GameState, 'mapSize' | 'tiles'>,
+  worldX: number,
+  worldZ: number
+): number {
+  const { mapSize } = state;
+  if (mapSize <= 0 || state.tiles.length === 0) return ELEV_STEP;
+
+  const clampedX = Math.max(-0.5, Math.min(mapSize - 0.50001, worldX));
+  const clampedZ = Math.max(-0.5, Math.min(mapSize - 0.50001, worldZ));
+
+  const rx = Math.max(0, Math.min(mapSize - 1, Math.floor(clampedX + 0.5)));
+  const rz = Math.max(0, Math.min(mapSize - 1, Math.floor(clampedZ + 0.5)));
+
+  const tile = getTileAt(state, rx, rz);
+  if (!tile) {
+    return getSurfaceHeightAt(state, clampedX, clampedZ);
+  }
+
+  if (tile.bridge === 'ROAD' || tile.bridge === 'RAIL') {
+    return BRIDGE_DECK_Y;
+  }
+
+  if (tile.terrain !== 'WATER') {
+    const localX = clampedX - rx;
+    const localZ = clampedZ - rz;
+
+    if (localX > 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx + 1, rz), 'X')) {
+      const t = Math.min(1, localX / 0.5);
+      const startY = getSurfaceHeightAt(state, rx, clampedZ);
+      return startY + (BRIDGE_DECK_Y - startY) * t;
+    }
+    if (localX < 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx - 1, rz), 'X')) {
+      const t = Math.min(1, -localX / 0.5);
+      const startY = getSurfaceHeightAt(state, rx, clampedZ);
+      return startY + (BRIDGE_DECK_Y - startY) * t;
+    }
+    if (localZ > 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx, rz + 1), 'Y')) {
+      const t = Math.min(1, localZ / 0.5);
+      const startY = getSurfaceHeightAt(state, clampedX, rz);
+      return startY + (BRIDGE_DECK_Y - startY) * t;
+    }
+    if (localZ < 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx, rz - 1), 'Y')) {
+      const t = Math.min(1, -localZ / 0.5);
+      const startY = getSurfaceHeightAt(state, clampedX, rz);
+      return startY + (BRIDGE_DECK_Y - startY) * t;
+    }
+  }
+
+  return getSurfaceHeightAt(state, clampedX, clampedZ);
+}
+
 export function getTileSurfaceY(
-  tile: Pick<Tile, 'x' | 'y' | 'terrain' | 'elevation'> | undefined | null,
+  tile: Pick<Tile, 'x' | 'y' | 'terrain' | 'elevation' | 'bridge'> | undefined | null,
   state?: Pick<GameState, 'mapSize' | 'tiles'>
 ): number {
   if (!tile) return ELEV_STEP;
+  if (tile.bridge === 'ROAD' || tile.bridge === 'RAIL') {
+    return BRIDGE_DECK_Y;
+  }
   if (tile.terrain === 'WATER' && tile.elevation <= 0) {
     return WATER_SURFACE_Y;
   }
@@ -194,16 +274,39 @@ export function getTileSurfaceY(
   return Math.max(WATER_SURFACE_Y, tile.elevation * ELEV_STEP);
 }
 
+interface OwnerColorStateLike {
+  corporate?: { playerColor?: string };
+  aiCompanies?: AICompany[];
+  remotePlayers?: Array<{ clientId: string; color?: string }>;
+}
+
+let activeOwnerColorState: OwnerColorStateLike | null = null;
+
+export function setOwnerColorStateContext(state: OwnerColorStateLike | null): void {
+  activeOwnerColorState = state;
+}
+
 export function resolveOwnerColor(
   ownerId: string | null | undefined,
-  aiCompanies: AICompany[]
+  aiCompanies: AICompany[],
+  state?: OwnerColorStateLike
 ): string {
+  const ctx = state ?? activeOwnerColorState;
   if (!ownerId || ownerId === 'player' || ownerId === 'PLAYER') {
-    return '#2563eb'; // Classic TTD Royal Blue
+    return ctx?.corporate?.playerColor || '#2563eb'; // Assigned or Classic TTD Royal Blue
   }
-  for (let i = 0; i < aiCompanies.length; i++) {
-    if (aiCompanies[i].id === ownerId) {
-      return aiCompanies[i].color || '#dc2626';
+  const peers = ctx?.remotePlayers;
+  if (peers) {
+    for (let i = 0; i < peers.length; i++) {
+      if (peers[i].clientId === ownerId && peers[i].color) {
+        return peers[i].color!;
+      }
+    }
+  }
+  const companies = aiCompanies.length > 0 ? aiCompanies : ctx?.aiCompanies ?? [];
+  for (let i = 0; i < companies.length; i++) {
+    if (companies[i].id === ownerId) {
+      return companies[i].color || '#dc2626';
     }
   }
   if (ownerId === 'ai-1') return '#dc2626';
@@ -272,7 +375,7 @@ export class IsoSceneManager {
   private cursorOutlinePositions: Float32Array;
   private cursorOutlineLoop: THREE.LineSegments;
 
-  private readonly maxPreviewInstances = 256;
+  private readonly maxPreviewInstances = 320;
   private dragFillGeo: THREE.BufferGeometry;
   private dragFillPositions: Float32Array;
   private dragFillColors: Float32Array;
@@ -301,7 +404,7 @@ export class IsoSceneManager {
     const halfH = BASE_FRUSTUM_HEIGHT / 2;
     const halfW = halfH * aspect;
 
-    this.camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, 360);
+    this.camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, 560);
     this.camera.rotation.order = 'YXZ';
     this.camera.zoom = this.currentZoom;
 
@@ -430,7 +533,7 @@ export class IsoSceneManager {
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 2;
-    this.sunLight.shadow.camera.far = 125;
+    this.sunLight.shadow.camera.far = 180;
     this.sunLight.shadow.bias = -0.00045;
     this.sunLight.shadow.normalBias = 0.018;
 
@@ -679,7 +782,7 @@ export class IsoSceneManager {
 
     // Update tight orthographic shadow frustum tracking panTarget with light-space texel snapping
     if (this.sunLight) {
-      const halfSpan = THREE.MathUtils.clamp(24 / Math.sqrt(this.currentZoom), 14, 34);
+      const halfSpan = THREE.MathUtils.clamp(24 / Math.sqrt(this.currentZoom), 14, 48);
       const cam = this.sunLight.shadow.camera;
       if (Math.abs(cam.right - halfSpan) > 0.5) {
         cam.left = -halfSpan;
@@ -709,7 +812,7 @@ export class IsoSceneManager {
         this.shadowUp.z * projU +
         this.sunOffsetDir.z * projD;
 
-      const sunDist = 58;
+      const sunDist = 80;
       this.sunLight.target.position.set(tx, ty, tz);
       this.sunLight.target.updateMatrixWorld();
       this.sunLight.position.set(
@@ -722,7 +825,7 @@ export class IsoSceneManager {
   }
 
   /**
-   * Continuous heightfield raymarch + binary refinement against `getSurfaceHeightAt(state, wx, wz)`.
+   * Continuous heightfield raymarch + binary refinement against `getTravelSurfaceHeightAt(state, wx, wz)`.
    */
   public pickTileAtClientPos(
     clientX: number,
@@ -742,7 +845,7 @@ export class IsoSceneManager {
     const dir = this.raycaster.ray.direction;
     if (Math.abs(dir.y) < 1e-5) return null;
 
-    const maxY = 2.4;
+    const maxY = 2.6;
     const minY = -0.1;
     const tStart = (maxY - origin.y) / dir.y;
     const tEnd = (minY - origin.y) / dir.y;
@@ -760,7 +863,7 @@ export class IsoSceneManager {
       const wz = origin.z + dir.z * t;
 
       if (wx >= -0.5 && wz >= -0.5 && wx < state.mapSize - 0.5 && wz < state.mapSize - 0.5) {
-        const surfY = getSurfaceHeightAt(state, wx, wz);
+        const surfY = getTravelSurfaceHeightAt(state, wx, wz);
         if (wy <= surfY + 0.006) {
           // Refine exact ray intersection across [prevT, t]
           let lo = prevT;
@@ -770,7 +873,7 @@ export class IsoSceneManager {
             const mx = origin.x + dir.x * mid;
             const my = origin.y + dir.y * mid;
             const mz = origin.z + dir.z * mid;
-            if (my <= getSurfaceHeightAt(state, mx, mz)) {
+            if (my <= getTravelSurfaceHeightAt(state, mx, mz)) {
               hi = mid;
             } else {
               lo = mid;
@@ -815,7 +918,7 @@ export class IsoSceneManager {
       const prog = THREE.MathUtils.clamp(v.progress || 0, 0, 1);
       const wx = v.x + (v.nextX - v.x) * prog;
       const wz = v.y + (v.nextY - v.y) * prog;
-      const wy = getSurfaceHeightAt(state, wx, wz) + 0.16;
+      const wy = getTravelSurfaceHeightAt(state, wx, wz) + 0.16;
 
       const proj = this.projectWorldToScreen(wx, wy, wz);
       if (!proj.visible) continue;
@@ -860,7 +963,8 @@ export class IsoSceneManager {
     triOut: Float32Array,
     triBaseFloat: number,
     lineOut: Float32Array,
-    lineBaseFloat: number
+    lineBaseFloat: number,
+    flatOverrideY?: number
   ): void {
     const { cNW, cNE, cSE, cSW, splitNWSE } = getTileCornerHeights(state, tx, ty);
     const half = 0.5 - inset;
@@ -869,10 +973,10 @@ export class IsoSceneManager {
     const z0 = ty - half;
     const z1 = ty + half;
 
-    const yNW = cNW + liftY;
-    const yNE = cNE + liftY;
-    const ySE = cSE + liftY;
-    const ySW = cSW + liftY;
+    const yNW = (flatOverrideY ?? cNW) + liftY;
+    const yNE = (flatOverrideY ?? cNE) + liftY;
+    const ySE = (flatOverrideY ?? cSE) + liftY;
+    const ySW = (flatOverrideY ?? cSW) + liftY;
 
     let ti = triBaseFloat;
     if (splitNWSE) {
@@ -919,7 +1023,7 @@ export class IsoSceneManager {
     state: GameState,
     timeSec: number
   ): void {
-    // 1. Multi-tile sloped drag preview (ROAD / RAIL)
+    // 1. Multi-tile sloped drag preview (ROAD / RAIL / ROAD_BRIDGE / RAIL_BRIDGE)
     if (dragTiles && dragTiles.length > 0) {
       this.cursorFillMesh.visible = false;
       this.cursorOutlineLoop.visible = false;
@@ -927,10 +1031,47 @@ export class IsoSceneManager {
       const count = Math.min(dragTiles.length, this.maxPreviewInstances);
       const pulse = 0.85 + 0.15 * Math.sin(timeSec * 8);
 
+      // Check whether this drag forms a valid straight shore-to-shore water bridge
+      const firstPt = dragTiles[0];
+      const lastPt = dragTiles[dragTiles.length - 1];
+      const firstTile = getTileAt(state, firstPt.x, firstPt.y);
+      const lastTile = getTileAt(state, lastPt.x, lastPt.y);
+      const isOrthogonalLine = firstPt.x === lastPt.x || firstPt.y === lastPt.y;
+      let waterSpanCount = 0;
+      for (let k = 0; k < dragTiles.length; k++) {
+        const qt = getTileAt(state, dragTiles[k].x, dragTiles[k].y);
+        if (qt && qt.terrain === 'WATER') waterSpanCount++;
+      }
+      const isBridgeSpanValid =
+        isOrthogonalLine &&
+        dragTiles.length >= 3 &&
+        waterSpanCount >= 1 &&
+        waterSpanCount <= 24 &&
+        Boolean(firstTile && firstTile.terrain !== 'WATER' && !firstTile.industryId) &&
+        Boolean(lastTile && lastTile.terrain !== 'WATER' && !lastTile.industryId);
+
+      const desiredBridgeKind =
+        activeTool === 'RAIL' || activeTool === 'RAIL_BRIDGE' ? 'RAIL' : 'ROAD';
+
       for (let i = 0; i < count; i++) {
         const pt = dragTiles[i];
         const tile = getTileAt(state, pt.x, pt.y);
-        const canBuild = tile ? tile.terrain !== 'WATER' && !tile.industryId : false;
+        const isWaterTile = Boolean(tile && tile.terrain === 'WATER');
+
+        let canBuild = false;
+        let flatY: number | undefined;
+
+        if (tile && !tile.industryId) {
+          if (isWaterTile) {
+            const bridgeConflict = tile.bridge && tile.bridge !== desiredBridgeKind;
+            canBuild = isBridgeSpanValid && !bridgeConflict;
+            if (canBuild || tile.bridge) {
+              flatY = BRIDGE_DECK_Y;
+            }
+          } else {
+            canBuild = true;
+          }
+        }
 
         this.writeSlopedTileQuadAndOutline(
           state,
@@ -941,10 +1082,16 @@ export class IsoSceneManager {
           this.dragFillPositions,
           i * 18,
           this.dragOutlinePositions,
-          i * 24
+          i * 24,
+          flatY
         );
 
-        this.tmpColor.set(canBuild ? '#38bdf8' : '#ef4444').multiplyScalar(pulse);
+        const fillHex = !canBuild
+          ? '#ef4444'
+          : isWaterTile
+          ? '#22d3ee'
+          : '#38bdf8';
+        this.tmpColor.set(fillHex).multiplyScalar(pulse);
         for (let v = 0; v < 6; v++) {
           const ci = i * 18 + v * 3;
           this.dragFillColors[ci] = this.tmpColor.r;
@@ -991,11 +1138,19 @@ export class IsoSceneManager {
     } else if (activeTool === 'BULLDOZE') {
       ringHex = '#ef4444';
       fillHex = '#f87171';
+    } else if (activeTool === 'ROAD_BRIDGE' || activeTool === 'RAIL_BRIDGE') {
+      // Bridge tool starts on non-water shore land tile and drags across water
+      const isShoreLand = tile.terrain !== 'WATER' && !tile.industryId;
+      ringHex = isShoreLand ? '#fde047' : '#38bdf8';
+      fillHex = isShoreLand ? '#34d399' : '#0ea5e9';
     } else if (activeTool !== 'SELECT') {
-      const blockedByWater = tile.terrain === 'WATER';
+      const blockedByWater = tile.terrain === 'WATER' && !tile.bridge;
       ringHex = blockedByWater ? '#ef4444' : '#fde047';
       fillHex = blockedByWater ? '#f87171' : '#34d399';
     }
+
+    const hoverFlatY =
+      tile.bridge === 'ROAD' || tile.bridge === 'RAIL' ? BRIDGE_DECK_Y : undefined;
 
     this.writeSlopedTileQuadAndOutline(
       state,
@@ -1006,7 +1161,8 @@ export class IsoSceneManager {
       this.cursorFillPositions,
       0,
       this.cursorOutlinePositions,
-      0
+      0,
+      hoverFlatY
     );
     this.cursorFillGeo.attributes.position.needsUpdate = true;
     this.cursorOutlineGeo.attributes.position.needsUpdate = true;

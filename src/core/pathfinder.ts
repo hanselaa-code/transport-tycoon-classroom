@@ -18,10 +18,17 @@ export function isTileTraversableForNetwork(
   tile: Tile,
   network: 'ROAD' | 'RAIL'
 ): boolean {
+  if (tile.bridge) {
+    return tile.bridge === network;
+  }
   if (network === 'ROAD') {
     return Boolean(tile.road || tile.depot === 'ROAD');
   }
   return Boolean(tile.rail || tile.depot === 'RAIL');
+}
+
+export function getEffectiveTrackElevation(tile: Tile): number {
+  return tile.bridge ? Math.max(1, tile.elevation) : tile.elevation;
 }
 
 /**
@@ -139,6 +146,16 @@ export function findNetworkPath(
         continue;
       }
 
+      const stepAxis: 'X' | 'Y' = dx !== 0 ? 'X' : 'Y';
+      if (curTile.bridge) {
+        if (curTile.bridge !== network) continue;
+        if (curTile.bridgeAxis && curTile.bridgeAxis !== stepAxis) continue;
+      }
+      if (nextTile.bridge) {
+        if (nextTile.bridge !== network) continue;
+        if (nextTile.bridgeAxis && nextTile.bridgeAxis !== stepAxis) continue;
+      }
+
       // Do not route through unrelated depots unless starting or ending there
       if (
         nextTile.depot &&
@@ -149,8 +166,8 @@ export function findNetworkPath(
       }
 
       const slopeFactor = calculateSlopeSpeedFactor(
-        curTile.elevation,
-        nextTile.elevation,
+        getEffectiveTrackElevation(curTile),
+        getEffectiveTrackElevation(nextTile),
         network === 'RAIL' ? 'rail' : 'road'
       );
       let stepCost = 1 / Math.max(0.25, slopeFactor);
@@ -201,6 +218,43 @@ export function findConstructionCorridor(
   goalY: number,
   mode: 'ROAD' | 'RAIL',
   blockedSet?: Set<number>
+): GridPoint[] {
+  const overland = runConstructionCorridorSearch(
+    tiles,
+    mapSize,
+    startX,
+    startY,
+    goalX,
+    goalY,
+    mode,
+    blockedSet,
+    false
+  );
+  if (overland.length > 0) return overland;
+
+  return runConstructionCorridorSearch(
+    tiles,
+    mapSize,
+    startX,
+    startY,
+    goalX,
+    goalY,
+    mode,
+    blockedSet,
+    true
+  );
+}
+
+function runConstructionCorridorSearch(
+  tiles: Tile[],
+  mapSize: number,
+  startX: number,
+  startY: number,
+  goalX: number,
+  goalY: number,
+  mode: 'ROAD' | 'RAIL',
+  blockedSet: Set<number> | undefined,
+  allowWaterBridges: boolean
 ): GridPoint[] {
   if (!inBounds(startX, startY, mapSize) || !inBounds(goalX, goalY, mapSize)) {
     return [];
@@ -281,16 +335,84 @@ export function findConstructionCorridor(
       const ny = cy + dy;
       if (!inBounds(nx, ny, mapSize)) continue;
       const nIdx = tileIndex(nx, ny, mapSize);
+
+      const nt = tiles[nIdx];
+      if (nt.terrain === 'WATER') {
+        if (!allowWaterBridges || curTile.terrain === 'WATER') continue;
+        // Scan straight across water span (1..20 water tiles) to opposite dry shore
+        const stepAxis: 'X' | 'Y' = dx !== 0 ? 'X' : 'Y';
+        let spanValid = true;
+        let landX = -1;
+        let landY = -1;
+        let waterLen = 0;
+        for (let step = 1; step <= 21; step++) {
+          const sx = cx + dx * step;
+          const sy = cy + dy * step;
+          if (!inBounds(sx, sy, mapSize)) {
+            spanValid = false;
+            break;
+          }
+          const sIdx = tileIndex(sx, sy, mapSize);
+          const st = tiles[sIdx];
+          if (st.terrain === 'WATER') {
+            if (blockedSet && blockedSet.has(sIdx)) {
+              spanValid = false;
+              break;
+            }
+            if (st.bridge && (st.bridge !== mode || st.bridgeAxis !== stepAxis)) {
+              spanValid = false;
+              break;
+            }
+            waterLen++;
+            if (waterLen > 20) {
+              spanValid = false;
+              break;
+            }
+          } else {
+            // Reached opposite land shore
+            const landEndpoint = sIdx === goalIdx || sIdx === startIdx;
+            if (
+              !landEndpoint &&
+              (st.industryId ||
+                st.hqOwnerId ||
+                st.depot ||
+                st.stationId ||
+                (st.buildingTier ?? 0) > 0 ||
+                (mode === 'ROAD' && st.signal) ||
+                (blockedSet && blockedSet.has(sIdx)))
+            ) {
+              spanValid = false;
+            } else {
+              landX = sx;
+              landY = sy;
+            }
+            break;
+          }
+        }
+        if (spanValid && waterLen >= 1 && landX !== -1) {
+          const landIdx = tileIndex(landX, landY, mapSize);
+          if (!closed[landIdx]) {
+            const bridgeCost = (waterLen + 1) * 4.2;
+            const tentative = gScore[cur] + bridgeCost;
+            if (tentative < gScore[landIdx]) {
+              cameFrom[landIdx] = cur;
+              gScore[landIdx] = tentative;
+              const h = Math.abs(landX - goalX) + Math.abs(landY - goalY);
+              pushHeap(landIdx, tentative + h);
+            }
+          }
+        }
+        continue;
+      }
+
       if (closed[nIdx]) continue;
       if (blockedSet && blockedSet.has(nIdx) && nIdx !== goalIdx && nIdx !== startIdx) {
         continue;
       }
 
-      const nt = tiles[nIdx];
       const isEndpoint = nIdx === goalIdx || nIdx === startIdx;
 
       if (!isEndpoint) {
-        if (nt.terrain === 'WATER') continue;
         if (nt.industryId || nt.hqOwnerId || nt.depot || nt.stationId) continue;
         if ((nt.buildingTier ?? 0) > 0) continue;
         if (mode === 'ROAD' && nt.signal) continue;
@@ -321,16 +443,37 @@ export function findConstructionCorridor(
 
   if (!found) return [];
 
-  const result: GridPoint[] = [];
+  const anchorChain: GridPoint[] = [];
   let trace = goalIdx;
   while (trace !== -1) {
     const px = trace % mapSize;
     const py = (trace - px) / mapSize;
-    result.push({ x: px, y: py });
+    anchorChain.push({ x: px, y: py });
     if (trace === startIdx) break;
     trace = cameFrom[trace];
   }
-  result.reverse();
+  anchorChain.reverse();
+
+  // Expand any straight water-bridge jump segments into contiguous tile coordinates
+  const result: GridPoint[] = [];
+  for (let i = 0; i < anchorChain.length; i++) {
+    const curPt = anchorChain[i];
+    if (i === 0) {
+      result.push(curPt);
+      continue;
+    }
+    const prevPt = anchorChain[i - 1];
+    const dist = Math.abs(curPt.x - prevPt.x) + Math.abs(curPt.y - prevPt.y);
+    if (dist > 1) {
+      const stepX = Math.sign(curPt.x - prevPt.x);
+      const stepY = Math.sign(curPt.y - prevPt.y);
+      for (let s = 1; s <= dist; s++) {
+        result.push({ x: prevPt.x + stepX * s, y: prevPt.y + stepY * s });
+      }
+    } else {
+      result.push(curPt);
+    }
+  }
   return result;
 }
 

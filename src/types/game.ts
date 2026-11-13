@@ -19,6 +19,8 @@ export type ToolType =
   | 'SELECT'
   | 'RAIL'
   | 'ROAD'
+  | 'RAIL_BRIDGE'
+  | 'ROAD_BRIDGE'
   | 'RAIL_DEPOT'
   | 'ROAD_DEPOT'
   | 'TRAIN_STATION'
@@ -39,6 +41,29 @@ export type VehicleModelId =
 
 export type ScenarioType = 'standard' | 'boom' | 'challenge';
 
+export type MapSizeOption = 64 | 96 | 128 | 160;
+
+export type WorldTerrainType = 'flat' | 'hilly' | 'mountainous';
+
+export type WaterLevelType = 'very_low' | 'low' | 'medium' | 'high';
+
+export type DensityType = 'low' | 'normal' | 'high';
+
+export interface WorldSetupConfig {
+  mapSize: MapSizeOption;
+  gameMode: 'singleplayer' | 'multiplayer';
+  playersPerWorld: number;
+  aiEnabled: boolean;
+  maxAiCount: 0 | 1 | 2 | 3;
+  terrainType: WorldTerrainType;
+  waterLevel: WaterLevelType;
+  townDensity: DensityType;
+  industryDensity: DensityType;
+  startYear: number;
+  scenario: ScenarioType;
+  seed: number;
+}
+
 export type DemoRouteType = 'coal_rail' | 'wood_truck' | 'bus_line';
 
 export type TerrainType = 'WATER' | 'SAND' | 'GRASS' | 'FOREST_TREES';
@@ -52,11 +77,14 @@ export interface Tile {
   rail: boolean;
   signal: boolean;
   signalBlocked?: boolean;
+  bridge?: 'ROAD' | 'RAIL' | null;
+  bridgeAxis?: 'X' | 'Y';
   depot?: 'ROAD' | 'RAIL' | null;
   stationId?: string | null;
   townId?: string | null;
   industryId?: string | null;
   hqOwnerId?: string | null;
+  hqOwnerTier?: number;
   ownerId?: string | null;
   buildingTier?: number;
 }
@@ -174,6 +202,7 @@ export interface PnLStatement {
 
 export interface CorporateFinance {
   companyName: string;
+  playerColor?: string;
   cash: number;
   loan: number;
   maxLoan: number;
@@ -266,6 +295,7 @@ export interface GameDate {
   day: number;
   month: number;
   year: number;
+  calendarYear?: number;
   totalDays: number;
   totalMonths: number;
 }
@@ -299,6 +329,8 @@ export interface TileInspectionInfo {
   road: boolean;
   rail: boolean;
   signal: boolean;
+  bridge?: 'ROAD' | 'RAIL' | null;
+  bridgeAxis?: 'X' | 'Y' | null;
   depot: 'ROAD' | 'RAIL' | null;
   hqTier: number | null;
   ownerId: string | null;
@@ -330,6 +362,43 @@ export interface StationDetailsInfo {
   hqBonusPct: number;
 }
 
+export interface ModifiedTileDelta {
+  x: number;
+  y: number;
+  road?: boolean;
+  rail?: boolean;
+  signal?: boolean;
+  bridge?: 'ROAD' | 'RAIL' | null;
+  bridgeAxis?: 'X' | 'Y';
+  depot?: 'ROAD' | 'RAIL' | null;
+  stationId?: string | null;
+  hqOwnerId?: string | null;
+  hqOwnerTier?: number;
+}
+
+export interface RemotePlayerWorldSlice {
+  clientId: string;
+  ownerName: string;
+  companyName: string;
+  color: string;
+  cash: number;
+  companyValue: number;
+  annualProfit: number;
+  hqTile: { x: number; y: number } | null;
+  hqTier: number;
+  modifiedTiles: ModifiedTileDelta[];
+  stations: Station[];
+  vehicles: Vehicle[];
+  updatedAt?: number;
+}
+
+export interface LocalPlayerIdentity {
+  clientId: string;
+  ownerName: string;
+  companyName: string;
+  playerColor: string;
+}
+
 export interface GameState {
   mapSize: number;
   tiles: Tile[];
@@ -345,6 +414,8 @@ export interface GameState {
   aiCompanies: AICompany[];
   news: NewsItem[];
   scenario: ScenarioType;
+  worldSetup?: WorldSetupConfig;
+  remotePlayers?: RemotePlayerWorldSlice[];
   networkRevision?: number;
   lastSavedAtMs?: number | null;
 }

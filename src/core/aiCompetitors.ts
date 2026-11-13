@@ -31,8 +31,14 @@ import {
 import { inBounds, tileIndex } from './mapGenerator';
 import { findConstructionCorridor, findNetworkPath, GridPoint } from './pathfinder';
 
-export function createInitialAICompanies(): AICompany[] {
-  return [
+export function createInitialAICompanies(
+  aiEnabled = true,
+  maxAiCount: 0 | 1 | 2 | 3 = 3
+): AICompany[] {
+  if (!aiEnabled || maxAiCount <= 0) {
+    return [];
+  }
+  const all: AICompany[] = [
     {
       id: 'ai-1',
       name: 'Nordic Rail & Cargo',
@@ -85,6 +91,7 @@ export function createInitialAICompanies(): AICompany[] {
       routeSummary: 'Børsnoteres År 4 (Måned 36)',
     },
   ];
+  return all.slice(0, Math.min(3, Math.max(0, maxAiCount)));
 }
 
 function isTileClearForStructure(tile: Tile): boolean {
@@ -213,9 +220,11 @@ function placeStationRecord(
   ownerId: string,
   kind: StationKind,
   pt: GridPoint,
-  baseLabel: string
+  baseLabel: string,
+  idPrefix = ''
 ): Station {
-  const id = `st-${state.stations.length + 1}-${Math.random().toString(36).slice(2, 5)}`;
+  const prefixPart = idPrefix ? `${idPrefix}-` : '';
+  const id = `st-${prefixPart}${state.stations.length + 1}-${Math.random().toString(36).slice(2, 5)}`;
   const t = state.tiles[tileIndex(pt.x, pt.y, state.mapSize)];
   t.terrain = 'GRASS';
   t.stationId = id;
@@ -272,7 +281,8 @@ function createSpawnedVehicle(
   depotPt: GridPoint,
   orders: string[],
   startOrderIndex: number,
-  initialState: 'MOVING' | 'LOADING'
+  initialState: 'MOVING' | 'LOADING',
+  idPrefix = ''
 ): Vehicle {
   const spec = VEHICLE_CATALOG[modelId];
   const purchaseValue = calculateVehiclePurchaseCost(modelId, wagonCount);
@@ -304,8 +314,9 @@ function createSpawnedVehicle(
 
   const nextStep = initialPath[0] ?? startPt;
 
+  const prefixPart = idPrefix ? `${idPrefix}-` : '';
   const vehicle: Vehicle = {
-    id: `veh-${state.vehicles.length + 1}-${Math.random().toString(36).slice(2, 5)}`,
+    id: `veh-${prefixPart}${state.vehicles.length + 1}-${Math.random().toString(36).slice(2, 5)}`,
     name: `${prefix} #${numForOwner} (${CARGO_LABELS_NO[cargoType]})`,
     ownerId,
     network: spec.network,
@@ -354,6 +365,44 @@ export interface BuiltRouteSummary {
   vehicleIds: string[];
 }
 
+function layCorridorTiles(
+  state: GameState,
+  pts: GridPoint[],
+  mode: 'ROAD' | 'RAIL',
+  ownerId: string
+): number {
+  let cost = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const t = state.tiles[tileIndex(p.x, p.y, state.mapSize)];
+    if (t.terrain === 'WATER') {
+      const adj = pts[i + 1] ?? pts[i - 1] ?? p;
+      const axis: 'X' | 'Y' = Math.abs(adj.x - p.x) > 0 ? 'X' : 'Y';
+      if (!t.bridge) {
+        t.bridge = mode;
+        t.bridgeAxis = axis;
+        t.road = mode === 'ROAD';
+        t.rail = mode === 'RAIL';
+        if (!t.ownerId) t.ownerId = ownerId;
+        cost += mode === 'RAIL' ? 18_000 : 12_000;
+      }
+      continue;
+    }
+    if (mode === 'RAIL' && !t.rail) {
+      t.rail = true;
+      t.terrain = 'GRASS';
+      if (!t.ownerId) t.ownerId = ownerId;
+      cost += 4_500;
+    } else if (mode === 'ROAD' && !t.road) {
+      t.road = true;
+      t.terrain = 'GRASS';
+      if (!t.ownerId) t.ownerId = ownerId;
+      cost += 2_500;
+    }
+  }
+  return cost;
+}
+
 /**
  * Shared route builder used by both `spawnDemoRoute` (for player/teacher instant routes)
  * and autonomous AI competitors (`ai-1`, `ai-2`, `ai-3`).
@@ -362,7 +411,8 @@ export function buildConnectedRoute(
   state: GameState,
   ownerId: string,
   routeType: DemoRouteType | 'grain_truck' | 'ai_rail_freight',
-  deductFromOwnerLedger: boolean
+  deductFromOwnerLedger: boolean,
+  idPrefix = ''
 ): BuiltRouteSummary {
   if (routeType === 'coal_rail' || routeType === 'ai_rail_freight') {
     // Pick best Coal Mine -> Power Plant (or Forest -> Sawmill fallback)
@@ -476,22 +526,9 @@ export function buildConnectedRoute(
           )
         : [];
 
-    let railTilesBuilt = 0;
-    const layRailList = (pts: GridPoint[]) => {
-      for (const p of pts) {
-        const t = state.tiles[tileIndex(p.x, p.y, state.mapSize)];
-        if (!t.rail) {
-          t.rail = true;
-          t.terrain = 'GRASS';
-          if (!t.ownerId) t.ownerId = ownerId;
-          railTilesBuilt++;
-        }
-      }
-    };
-
-    layRailList(mainCorridor);
+    let corridorCost = layCorridorTiles(state, mainCorridor, 'RAIL', ownerId);
     if (secondCorridor.length >= 3) {
-      layRailList(secondCorridor);
+      corridorCost += layCorridorTiles(state, secondCorridor, 'RAIL', ownerId);
     }
 
     // Place Stations
@@ -500,22 +537,32 @@ export function buildConnectedRoute(
       ownerId,
       'TRAIN_STATION',
       ptA,
-      bestPair.src.name.split(' ')[0]
+      bestPair.src.name.split(' ')[0],
+      idPrefix
     );
     const stB = placeStationRecord(
       state,
       ownerId,
       'TRAIN_STATION',
       ptB,
-      bestPair.dst.name.split(' ')[0]
+      bestPair.dst.name.split(' ')[0],
+      idPrefix
     );
 
-    // Place Block Signals along main and second corridors (away from junction endpoints & road level crossings)
+    // Place Block Signals along main and second corridors (away from junction endpoints, bridges & road level crossings)
     let signalCount = 0;
     const placeSignalsAlong = (pts: GridPoint[]) => {
       for (let i = 3; i < pts.length - 3; i += 6) {
         const t = state.tiles[tileIndex(pts[i].x, pts[i].y, state.mapSize)];
-        if (t.rail && !t.road && !t.stationId && !t.depot && !t.signal) {
+        if (
+          t.rail &&
+          !t.road &&
+          !t.bridge &&
+          t.terrain !== 'WATER' &&
+          !t.stationId &&
+          !t.depot &&
+          !t.signal
+        ) {
           t.signal = true;
           t.signalBlocked = false;
           signalCount++;
@@ -527,8 +574,13 @@ export function buildConnectedRoute(
       placeSignalsAlong(secondCorridor);
     }
 
-    // Place Rail Depot adjacent to mainCorridor[1] or stA
-    const depotAnchor = mainCorridor[1] ?? ptA;
+    // Place Rail Depot adjacent to a dry land tile along mainCorridor or stA
+    const depotAnchor =
+      mainCorridor.find(
+        (p, idx) =>
+          idx > 0 &&
+          state.tiles[tileIndex(p.x, p.y, state.mapSize)].terrain !== 'WATER'
+      ) ?? ptA;
     const depotPt =
       findDepotTileAdjacentTo(state, depotAnchor) ??
       findDepotTileAdjacentTo(state, ptA) ??
@@ -557,7 +609,8 @@ export function buildConnectedRoute(
       depotPt,
       orders,
       0,
-      'LOADING'
+      'LOADING',
+      idPrefix
     );
 
     const v2Ids: string[] = [v1.id];
@@ -573,12 +626,13 @@ export function buildConnectedRoute(
         depotPt,
         orders,
         secondCorridor.length >= 3 ? 1 : 1,
-        secondCorridor.length >= 3 ? 'LOADING' : 'MOVING'
+        secondCorridor.length >= 3 ? 'LOADING' : 'MOVING',
+        idPrefix
       );
       v2Ids.push(v2.id);
     }
 
-    const buildCost = railTilesBuilt * 4_500 + 2 * 45_000 + 55_000 + signalCount * 6_000;
+    const buildCost = corridorCost + 2 * 45_000 + 55_000 + signalCount * 6_000;
     const vehCost =
       calculateVehiclePurchaseCost(locoModel, 3) * v2Ids.length;
 
@@ -670,33 +724,31 @@ export function buildConnectedRoute(
 
     const { bestSrc, bestDst, ptA, ptB, roadCorridor } = chosenTruck;
 
-    let roadBuilt = 0;
-    for (const p of roadCorridor) {
-      const t = state.tiles[tileIndex(p.x, p.y, state.mapSize)];
-      if (!t.road) {
-        t.road = true;
-        t.terrain = 'GRASS';
-        if (!t.ownerId) t.ownerId = ownerId;
-        roadBuilt++;
-      }
-    }
+    const corridorCost = layCorridorTiles(state, roadCorridor, 'ROAD', ownerId);
 
     const stA = placeStationRecord(
       state,
       ownerId,
       'TRUCK_BAY',
       ptA,
-      bestSrc.name.split(' ')[0]
+      bestSrc.name.split(' ')[0],
+      idPrefix
     );
     const stB = placeStationRecord(
       state,
       ownerId,
       'TRUCK_BAY',
       ptB,
-      bestDst.name.split(' ')[0]
+      bestDst.name.split(' ')[0],
+      idPrefix
     );
 
-    const depotAnchor = roadCorridor[1] ?? ptA;
+    const depotAnchor =
+      roadCorridor.find(
+        (p, idx) =>
+          idx > 0 &&
+          state.tiles[tileIndex(p.x, p.y, state.mapSize)].terrain !== 'WATER'
+      ) ?? ptA;
     const depotPt =
       findDepotTileAdjacentTo(state, depotAnchor) ??
       findDepotTileAdjacentTo(state, ptA) ??
@@ -721,7 +773,8 @@ export function buildConnectedRoute(
       depotPt,
       orders,
       0,
-      'LOADING'
+      'LOADING',
+      idPrefix
     );
     const v2 = createSpawnedVehicle(
       state,
@@ -733,10 +786,11 @@ export function buildConnectedRoute(
       depotPt,
       orders,
       1,
-      'LOADING'
+      'LOADING',
+      idPrefix
     );
 
-    const buildCost = roadBuilt * 2_500 + 2 * 30_000 + 35_000;
+    const buildCost = corridorCost + 2 * 30_000 + 35_000;
     const vehCost = calculateVehiclePurchaseCost('TRUCK_CARGO', 0) * 2;
 
     if (deductFromOwnerLedger) {
@@ -829,21 +883,17 @@ export function buildConnectedRoute(
 
   const { townA, townB, ptA, ptB, roadCorridor } = chosenBus;
 
-  let roadBuilt = 0;
-  for (const p of roadCorridor) {
-    const t = state.tiles[tileIndex(p.x, p.y, state.mapSize)];
-    if (!t.road) {
-      t.road = true;
-      t.terrain = 'GRASS';
-      if (!t.ownerId) t.ownerId = ownerId;
-      roadBuilt++;
-    }
-  }
+  const corridorCost = layCorridorTiles(state, roadCorridor, 'ROAD', ownerId);
 
-  const stA = placeStationRecord(state, ownerId, 'BUS_STOP', ptA, townA.name);
-  const stB = placeStationRecord(state, ownerId, 'BUS_STOP', ptB, townB.name);
+  const stA = placeStationRecord(state, ownerId, 'BUS_STOP', ptA, townA.name, idPrefix);
+  const stB = placeStationRecord(state, ownerId, 'BUS_STOP', ptB, townB.name, idPrefix);
 
-  const depotAnchor = roadCorridor[1] ?? ptA;
+  const depotAnchor =
+    roadCorridor.find(
+      (p, idx) =>
+        idx > 0 &&
+        state.tiles[tileIndex(p.x, p.y, state.mapSize)].terrain !== 'WATER'
+    ) ?? ptA;
   const depotPt =
     findDepotTileAdjacentTo(state, depotAnchor) ??
     findDepotTileAdjacentTo(state, ptA) ??
@@ -868,7 +918,8 @@ export function buildConnectedRoute(
     depotPt,
     orders,
     0,
-    'LOADING'
+    'LOADING',
+    idPrefix
   );
   const v2 = createSpawnedVehicle(
     state,
@@ -880,10 +931,11 @@ export function buildConnectedRoute(
     depotPt,
     orders,
     1,
-    'LOADING'
+    'LOADING',
+    idPrefix
   );
 
-  const buildCost = roadBuilt * 2_500 + 2 * 25_000 + 35_000;
+  const buildCost = corridorCost + 2 * 25_000 + 35_000;
   const vehCost = calculateVehiclePurchaseCost('BUS_CITY', 0) * 2;
 
   if (deductFromOwnerLedger) {
@@ -973,6 +1025,12 @@ export function updateAIMarketMetrics(state: GameState, ai: AICompany): void {
  * Checks staggered AI competitor spawns (Months 12, 24, 36) and updates active AI operations monthly.
  */
 export function runMonthlyAICompetitorsTick(state: GameState): void {
+  if (
+    state.worldSetup &&
+    (!state.worldSetup.aiEnabled || state.worldSetup.maxAiCount <= 0)
+  ) {
+    return;
+  }
   const totalMonths = state.date.totalMonths;
 
   for (const ai of state.aiCompanies) {

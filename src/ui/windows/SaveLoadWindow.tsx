@@ -6,6 +6,8 @@ import {
   RotateCcw,
   CheckCircle2,
   Building2,
+  LogOut,
+  Home,
 } from 'lucide-react';
 import type { GameState, ScenarioType } from '../../types/game';
 import { GameEngine } from '../../core';
@@ -15,23 +17,37 @@ import { TTDWindow } from '../TTDWindow';
 export interface SaveLoadWindowProps {
   engine: GameEngine;
   state: GameState;
+  isLockedStudentPinSession?: boolean;
+  teacherEmail?: string | null;
   zIndex: number;
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
+  onReturnToMainMenu?: () => void;
+  onSignOutTeacher?: () => void;
 }
 
 export const SaveLoadWindow: React.FC<SaveLoadWindowProps> = ({
   engine,
   state,
+  isLockedStudentPinSession = false,
+  teacherEmail = null,
   zIndex,
   onFocus,
   onClose,
+  onReturnToMainMenu,
+  onSignOutTeacher,
 }) => {
   const [companyName, setCompanyName] = useState(state.corporate.companyName);
   const [ownerName, setOwnerName] = useState(state.personal.ownerName);
   const [scenario, setScenario] = useState<ScenarioType>(state.scenario);
-  const [mapSize, setMapSize] = useState<64 | 96>(
-    state.mapSize === 96 ? 96 : 64
+  const [mapSize, setMapSize] = useState<64 | 96 | 128 | 160>(
+    state.mapSize === 160
+      ? 160
+      : state.mapSize === 128
+      ? 128
+      : state.mapSize === 96
+      ? 96
+      : 64
   );
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(
     null
@@ -223,60 +239,107 @@ export const SaveLoadWindow: React.FC<SaveLoadWindowProps> = ({
         </div>
       </form>
 
-      {/* New Game / Scenario Selector */}
-      <div className="ttd-panel p-2.5 space-y-2">
-        <div className="font-bold text-amber-200 text-xs">
-          Start helt nytt spill / Velg scenario
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <div>
-            <label className="block text-[11px] text-slate-300 mb-1">
-              Scenario:
-            </label>
-            <select
-              value={scenario}
-              onChange={(e) => setScenario(e.target.value as ScenarioType)}
-              className="ttd-inset w-full px-2 py-1.5 text-xs text-slate-100"
-            >
-              {(['standard', 'boom', 'challenge'] as ScenarioType[]).map(
-                (sc) => (
-                  <option key={sc} value={sc}>
-                    {SCENARIO_LABELS_NO[sc].title}
-                  </option>
-                )
-              )}
-            </select>
+      {/* New Game / Scenario Selector (Teacher Mode) OR Session Info (Student PIN) */}
+      {!isLockedStudentPinSession ? (
+        <div className="ttd-panel p-2.5 space-y-2">
+          <div className="font-bold text-amber-200 text-xs">
+            Hurtigstart nytt kart (Lærer-modus)
           </div>
 
-          <div>
-            <label className="block text-[11px] text-slate-300 mb-1">
-              Kartstørrelse:
-            </label>
-            <select
-              value={mapSize}
-              onChange={(e) => setMapSize(Number(e.target.value) as 64 | 96)}
-              className="ttd-inset w-full px-2 py-1.5 text-xs text-slate-100"
-            >
-              <option value={64}>64 × 64 (Anbefalt for Chromebook)</option>
-              <option value={96}>96 × 96 (Stort kart)</option>
-            </select>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label className="block text-[11px] text-slate-300 mb-1">
+                Scenario:
+              </label>
+              <select
+                value={scenario}
+                onChange={(e) => setScenario(e.target.value as ScenarioType)}
+                className="ttd-inset w-full px-2 py-1.5 text-xs text-slate-100"
+              >
+                {(['standard', 'boom', 'challenge'] as ScenarioType[]).map(
+                  (sc) => (
+                    <option key={sc} value={sc}>
+                      {SCENARIO_LABELS_NO[sc].title}
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] text-slate-300 mb-1">
+                Kartstørrelse:
+              </label>
+              <select
+                value={mapSize}
+                onChange={(e) =>
+                  setMapSize(Number(e.target.value) as 64 | 96 | 128 | 160)
+                }
+                className="ttd-inset w-full px-2 py-1.5 text-xs text-slate-100"
+              >
+                <option value={64}>64 × 64 (Lite)</option>
+                <option value={96}>96 × 96 (Middels)</option>
+                <option value={128}>128 × 128 (Stort)</option>
+                <option value={160}>160 × 160 (Svært stort)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="text-[11px] text-slate-300">
+            {SCENARIO_LABELS_NO[scenario].subtitle}
+          </div>
+
+          <button
+            type="button"
+            onClick={handleNewGame}
+            className="ttd-btn ttd-btn-red w-full !py-2"
+          >
+            <RotateCcw className="w-4 h-4" />
+            <span>Generer nytt kart & start på nytt</span>
+          </button>
+        </div>
+      ) : (
+        <div className="ttd-panel p-2.5 text-[11px] text-slate-300">
+          Du spiller i en aktiv <strong className="text-amber-200">Klasseroms-økt (PIN)</strong>. Kartinnstillinger og verdensfrø styres av læreren slik at alle i klassen konkurrerer på like vilkår!
+        </div>
+      )}
+
+      {/* Return to Main Menu / Sign Out */}
+      {(onReturnToMainMenu || onSignOutTeacher) && (
+        <div className="ttd-panel p-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] text-slate-300">
+            {teacherEmail ? (
+              <span>
+                Innlogget lærer: <strong className="text-amber-200">{teacherEmail}</strong>
+              </span>
+            ) : (
+              <span>Gå tilbake til hovedmeny for å bytte PIN-økt eller oppsett</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {onReturnToMainMenu && (
+              <button
+                type="button"
+                onClick={onReturnToMainMenu}
+                className="ttd-btn ttd-btn-brass !py-1.5 !px-3"
+              >
+                <Home className="w-3.5 h-3.5" />
+                <span>Tilbake til hovedmeny</span>
+              </button>
+            )}
+            {teacherEmail && onSignOutTeacher && (
+              <button
+                type="button"
+                onClick={onSignOutTeacher}
+                className="ttd-btn ttd-btn-red !py-1.5 !px-3"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Logg ut</span>
+              </button>
+            )}
           </div>
         </div>
-
-        <div className="text-[11px] text-slate-300">
-          {SCENARIO_LABELS_NO[scenario].subtitle}
-        </div>
-
-        <button
-          type="button"
-          onClick={handleNewGame}
-          className="ttd-btn ttd-btn-red w-full !py-2"
-        >
-          <RotateCcw className="w-4 h-4" />
-          <span>Generer nytt kart & start på nytt</span>
-        </button>
-      </div>
+      )}
     </TTDWindow>
   );
 };

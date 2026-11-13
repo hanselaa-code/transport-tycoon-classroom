@@ -1,4 +1,5 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
+import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
 const metaEnv: Record<string, string | undefined> =
@@ -25,11 +26,15 @@ export const hasValidFirebaseConfig = Boolean(
 
 let appInstance: FirebaseApp | null = null;
 let dbInstance: Firestore | null = null;
+let authInstance: Auth | null = null;
 
 if (hasValidFirebaseConfig) {
   try {
     appInstance = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
     dbInstance = getFirestore(appInstance);
+    if (typeof window !== 'undefined') {
+      authInstance = getAuth(appInstance);
+    }
   } catch (err) {
     console.warn('[Firebase] Initialization warning:', err);
   }
@@ -37,3 +42,4 @@ if (hasValidFirebaseConfig) {
 
 export const app: FirebaseApp | null = appInstance;
 export const db: Firestore | null = dbInstance;
+export const auth: Auth | null = authInstance;

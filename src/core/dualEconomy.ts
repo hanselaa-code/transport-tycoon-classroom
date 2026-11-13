@@ -22,6 +22,7 @@ import {
   ALL_CARGO_TYPES,
   BASE_LOAN_INTEREST_RATE,
   calculateVehicleBaseAnnualCost,
+  COMPANY_COLORS,
   DEFAULT_MAX_LOAN_KR,
   formatGameDate,
   formatKr,
@@ -83,6 +84,7 @@ export function createInitialCorporateFinance(
 
   return {
     companyName: 'Norsk Transport AS',
+    playerColor: COMPANY_COLORS.player,
     cash: startingCash,
     loan: INITIAL_CORPORATE_LOAN_KR,
     maxLoan: DEFAULT_MAX_LOAN_KR,
@@ -117,7 +119,12 @@ export function pushNews(
   text: string,
   category: NewsItem['category'] = 'INFO'
 ): void {
-  const dateLabel = formatGameDate(state.date.day, state.date.month, state.date.year);
+  const dateLabel = formatGameDate(
+    state.date.day,
+    state.date.month,
+    state.date.year,
+    state.date.calendarYear
+  );
   const id = `news-${state.date.totalDays}-${state.news.length + 1}-${Math.random()
     .toString(36)
     .slice(2, 6)}`;
@@ -568,7 +575,10 @@ export function recomputeValuationsAndWarnings(state: GameState): void {
 
   let infrastructureCount = 0;
   for (const t of state.tiles) {
-    if (t.ownerId === 'player' && (t.rail || t.road || t.depot || t.stationId)) {
+    if (
+      t.ownerId === 'player' &&
+      (t.rail || t.road || t.bridge || t.depot || t.stationId)
+    ) {
       infrastructureCount++;
     }
   }
@@ -709,6 +719,7 @@ export function placeHQAtTile(
   state.personal.cash -= tier1.personalCost;
   tile.terrain = 'GRASS';
   tile.hqOwnerId = 'player';
+  tile.hqOwnerTier = 1;
   tile.ownerId = 'player';
   state.corporate.hqTile = { x, y };
   state.corporate.hqTier = 1;
@@ -772,6 +783,11 @@ export function upgradeCorporateHQ(state: GameState): ActionResult {
   // Paid strictly from Personal Cash!
   state.personal.cash -= spec.personalCost;
   state.corporate.hqTier = nextTier;
+  if (state.corporate.hqTile) {
+    const hqT =
+      state.tiles[tileIndex(state.corporate.hqTile.x, state.corporate.hqTile.y, state.mapSize)];
+    if (hqT) hqT.hqOwnerTier = nextTier;
+  }
   state.corporate.annualInterestRate = Number(
     (BASE_LOAN_INTEREST_RATE - spec.loanInterestDiscountPct).toFixed(2)
   );

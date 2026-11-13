@@ -1,7 +1,21 @@
 import * as THREE from 'three';
 import type { CargoType, GameState, Vehicle, VehicleModelId } from '../types/game';
-import { getSurfaceHeightAt, resolveOwnerColor } from './IsoSceneManager';
+import {
+  getSurfaceHeightAt,
+  getTravelSurfaceHeightAt,
+  resolveOwnerColor,
+} from './IsoSceneManager';
 import { VehicleTexturesManager, shadeHex } from './VehicleTextures';
+
+function sampleVehicleTravelHeight(
+  state: GameState,
+  worldX: number,
+  worldZ: number
+): number {
+  return typeof getTravelSurfaceHeightAt === 'function'
+    ? getTravelSurfaceHeightAt(state, worldX, worldZ)
+    : getSurfaceHeightAt(state, worldX, worldZ);
+}
 
 interface Breadcrumb {
   x: number;
@@ -526,11 +540,11 @@ export class VehicleRenderer {
     const sampleFwd = 0.21;
     const sampleLat = 0.12;
 
-    const yCenter = getSurfaceHeightAt(state, wx, wz);
-    const yFront = getSurfaceHeightAt(state, wx + sinY * sampleFwd, wz + cosY * sampleFwd);
-    const yBack = getSurfaceHeightAt(state, wx - sinY * sampleFwd, wz - cosY * sampleFwd);
-    const yRight = getSurfaceHeightAt(state, wx + cosY * sampleLat, wz - sinY * sampleLat);
-    const yLeft = getSurfaceHeightAt(state, wx - cosY * sampleLat, wz + sinY * sampleLat);
+    const yCenter = sampleVehicleTravelHeight(state, wx, wz);
+    const yFront = sampleVehicleTravelHeight(state, wx + sinY * sampleFwd, wz + cosY * sampleFwd);
+    const yBack = sampleVehicleTravelHeight(state, wx - sinY * sampleFwd, wz - cosY * sampleFwd);
+    const yRight = sampleVehicleTravelHeight(state, wx + cosY * sampleLat, wz - sinY * sampleLat);
+    const yLeft = sampleVehicleTravelHeight(state, wx - cosY * sampleLat, wz + sinY * sampleLat);
 
     // Avoid dipping through sharp hill crests: support on max of center and wheel axle average
     const axleSupportY = Math.max(yCenter, 0.5 * (yFront + yBack));
@@ -563,7 +577,7 @@ export class VehicleRenderer {
       const v = state.vehicles[i];
       seenIds.add(v.id);
 
-      const ownerColor = resolveOwnerColor(v.ownerId, state.aiCompanies);
+      const ownerColor = resolveOwnerColor(v.ownerId, state.aiCompanies, state);
       const wagonCount = v.network === 'RAIL' ? Math.max(0, Math.min(8, v.wagonCount || 0)) : 0;
 
       let inst = this.instances.get(v.id);
