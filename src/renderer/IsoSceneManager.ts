@@ -4,7 +4,7 @@ import type { AICompany, GameState, Tile, ToolType, Vehicle } from '../types/gam
 export const ELEV_STEP = 0.28;
 export const WATER_SURFACE_Y = 0.08;
 export const TERRAIN_BASE_Y = -0.52;
-export const BRIDGE_DECK_Y = ELEV_STEP * 1.22;
+export const BRIDGE_DECK_Y = ELEV_STEP;
 
 // Classic Transport Tycoon isometric pitch: -atan(1 / sqrt(2)) ≈ -35.2643897 deg
 export const ISO_PITCH_RAD = -Math.atan(1 / Math.sqrt(2));
@@ -181,7 +181,67 @@ export function getSurfaceHeightAt(
   }
 }
 
+function inferBridgeAxis(
+  state: Pick<GameState, 'mapSize' | 'tiles'>,
+  tile: Tile
+): 'X' | 'Y' {
+  if (tile.bridgeAxis === 'X' || tile.bridgeAxis === 'Y') {
+    return tile.bridgeAxis;
+  }
+  const e = getTileAt(state, tile.x + 1, tile.y);
+  const w = getTileAt(state, tile.x - 1, tile.y);
+  if (
+    (e && (e.road || e.rail || e.bridge)) ||
+    (w && (w.road || w.rail || w.bridge))
+  ) {
+    return 'X';
+  }
+  return 'Y';
+}
+
+/**
+ * Exact elevated deck height for a water bridge tile (`tile.bridge === 'ROAD' | 'RAIL'`).
+ * Uses `tile.bridgeElevation * ELEV_STEP` when stored, or walks both directions along `bridgeAxis`
+ * to the two shore land tiles so level-1 shores meet the bridge at `0.28` (`ELEV_STEP`) with zero "dumpel".
+ */
+export function getBridgeDeckY(
+  state: Pick<GameState, 'mapSize' | 'tiles'>,
+  tile: Tile
+): number {
+  const storedElev = (tile as Tile & { bridgeElevation?: number }).bridgeElevation;
+  if (typeof storedElev === 'number' && storedElev >= 1) {
+    return storedElev * ELEV_STEP;
+  }
+
+  const axis = inferBridgeAxis(state, tile);
+  const stepX = axis === 'X' ? 1 : 0;
+  const stepY = axis === 'Y' ? 1 : 0;
+
+  let shoreElevA = 1;
+  for (let d = 1; d <= state.mapSize; d++) {
+    const cur = getTileAt(state, tile.x - stepX * d, tile.y - stepY * d);
+    if (!cur) break;
+    if (cur.terrain !== 'WATER' && !cur.bridge) {
+      shoreElevA = Math.max(1, cur.elevation);
+      break;
+    }
+  }
+
+  let shoreElevB = 1;
+  for (let d = 1; d <= state.mapSize; d++) {
+    const cur = getTileAt(state, tile.x + stepX * d, tile.y + stepY * d);
+    if (!cur) break;
+    if (cur.terrain !== 'WATER' && !cur.bridge) {
+      shoreElevB = Math.max(1, cur.elevation);
+      break;
+    }
+  }
+
+  return Math.max(1, shoreElevA, shoreElevB) * ELEV_STEP;
+}
+
 function isBridgeNeighborAlongAxis(
+  state: Pick<GameState, 'mapSize' | 'tiles'>,
   landTile: Tile,
   neighbor: Tile | undefined,
   axis: 'X' | 'Y'
@@ -189,7 +249,7 @@ function isBridgeNeighborAlongAxis(
   if (!neighbor || (neighbor.bridge !== 'ROAD' && neighbor.bridge !== 'RAIL')) {
     return false;
   }
-  if (neighbor.bridgeAxis && neighbor.bridgeAxis !== axis) {
+  if (inferBridgeAxis(state, neighbor) !== axis) {
     return false;
   }
   if (neighbor.bridge === 'ROAD') {
@@ -200,9 +260,10 @@ function isBridgeNeighborAlongAxis(
 
 /**
  * Travel surface height for roads, railways, and vehicles (`VehicleRenderer` & QA):
- * - On any water bridge tile (`tile.bridge === 'ROAD' || tile.bridge === 'RAIL'`), returns `BRIDGE_DECK_Y`.
- * - On a land shore tile adjacent to a connected bridge along the bridge axis, smoothly ramps from
- *   the land tile's center surface height to `BRIDGE_DECK_Y` at the shared water edge.
+ * - On any water bridge tile (`tile.bridge === 'ROAD' || tile.bridge === 'RAIL'`), returns `getBridgeDeckY(state, tile)`.
+ * - On a land shore tile adjacent to a connected bridge along the bridge axis, interpolates across
+ *   the full tile `[0..1]` from `inlandY` (`>= Math.max(1, tile.elevation) * ELEV_STEP`) to `targetDeckY`
+ *   so level-1 shores transition at a completely flat `0.28 -> 0.28 -> 0.28` with zero dip/hump!
  * - Otherwise returns `getSurfaceHeightAt(state, worldX, worldZ)`.
  */
 export function getTravelSurfaceHeightAt(
@@ -225,32 +286,90 @@ export function getTravelSurfaceHeightAt(
   }
 
   if (tile.bridge === 'ROAD' || tile.bridge === 'RAIL') {
-    return BRIDGE_DECK_Y;
+    return getBridgeDeckY(state, tile);
   }
 
   if (tile.terrain !== 'WATER') {
-    const localX = clampedX - rx;
-    const localZ = clampedZ - rz;
+    const nE = getTileAt(state, rx + 1, rz);
+    const nW = getTileAt(state, rx - 1, rz);
+    const nS = getTileAt(state, rx, rz + 1);
+    const nN = getTileAt(state, rx, rz - 1);
 
-    if (localX > 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx + 1, rz), 'X')) {
-      const t = Math.min(1, localX / 0.5);
-      const startY = getSurfaceHeightAt(state, rx, clampedZ);
-      return startY + (BRIDGE_DECK_Y - startY) * t;
+    const cElev = Math.max(1, tile.elevation);
+    const wElev = nW && nW.terrain !== 'WATER' ? Math.max(1, nW.elevation) : cElev;
+    const eElev = nE && nE.terrain !== 'WATER' ? Math.max(1, nE.elevation) : cElev;
+    const nElev = nN && nN.terrain !== 'WATER' ? Math.max(1, nN.elevation) : cElev;
+    const sElev = nS && nS.terrain !== 'WATER' ? Math.max(1, nS.elevation) : cElev;
+
+    const longWestY = 0.5 * (wElev + cElev) * ELEV_STEP;
+    const longEastY = 0.5 * (cElev + eElev) * ELEV_STEP;
+    const longNorthY = 0.5 * (nElev + cElev) * ELEV_STEP;
+    const longSouthY = 0.5 * (cElev + sElev) * ELEV_STEP;
+
+    const bE = isBridgeNeighborAlongAxis(state, tile, nE, 'X') ? nE : undefined;
+    const bW = isBridgeNeighborAlongAxis(state, tile, nW, 'X') ? nW : undefined;
+    if (bE || bW) {
+      const { cNW, cNE, cSE, cSW } = getTileCornerHeights(state, rx, rz);
+      const westY = bW ? getBridgeDeckY(state, bW) : Math.max(0.5 * (cNW + cSW), longWestY);
+      const eastY = bE ? getBridgeDeckY(state, bE) : Math.max(0.5 * (cNE + cSE), longEastY);
+      const u = Math.max(0, Math.min(1, clampedX - (rx - 0.5)));
+      return westY + (eastY - westY) * u;
     }
-    if (localX < 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx - 1, rz), 'X')) {
-      const t = Math.min(1, -localX / 0.5);
-      const startY = getSurfaceHeightAt(state, rx, clampedZ);
-      return startY + (BRIDGE_DECK_Y - startY) * t;
+
+    const bS = isBridgeNeighborAlongAxis(state, tile, nS, 'Y') ? nS : undefined;
+    const bN = isBridgeNeighborAlongAxis(state, tile, nN, 'Y') ? nN : undefined;
+    if (bS || bN) {
+      const { cNW, cNE, cSE, cSW } = getTileCornerHeights(state, rx, rz);
+      const northY = bN ? getBridgeDeckY(state, bN) : Math.max(0.5 * (cNW + cNE), longNorthY);
+      const southY = bS ? getBridgeDeckY(state, bS) : Math.max(0.5 * (cSW + cSE), longSouthY);
+      const v = Math.max(0, Math.min(1, clampedZ - (rz - 0.5)));
+      return northY + (southY - northY) * v;
     }
-    if (localZ > 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx, rz + 1), 'Y')) {
-      const t = Math.min(1, localZ / 0.5);
-      const startY = getSurfaceHeightAt(state, clampedX, rz);
-      return startY + (BRIDGE_DECK_Y - startY) * t;
-    }
-    if (localZ < 0 && isBridgeNeighborAlongAxis(tile, getTileAt(state, rx, rz - 1), 'Y')) {
-      const t = Math.min(1, -localZ / 0.5);
-      const startY = getSurfaceHeightAt(state, clampedX, rz);
-      return startY + (BRIDGE_DECK_Y - startY) * t;
+
+    const hasTransport = Boolean(tile.road || tile.rail || tile.depot || tile.stationId);
+    const nWW = getTileAt(state, rx - 2, rz);
+    const nEE = getTileAt(state, rx + 2, rz);
+    const nNN = getTileAt(state, rx, rz - 2);
+    const nSS = getTileAt(state, rx, rz + 2);
+    const adjShoreX = Boolean(
+      (nW && nW.terrain !== 'WATER' && isBridgeNeighborAlongAxis(state, nW, nWW, 'X')) ||
+        (nE && nE.terrain !== 'WATER' && isBridgeNeighborAlongAxis(state, nE, nEE, 'X'))
+    );
+    const adjShoreZ = Boolean(
+      (nN && nN.terrain !== 'WATER' && isBridgeNeighborAlongAxis(state, nN, nNN, 'Y')) ||
+        (nS && nS.terrain !== 'WATER' && isBridgeNeighborAlongAxis(state, nS, nSS, 'Y'))
+    );
+
+    if (hasTransport || adjShoreX || adjShoreZ) {
+      const sharesNet = (nb: Tile | undefined): boolean => {
+        if (!nb) return false;
+        if (
+          (tile.road || tile.depot === 'ROAD' || tile.stationId) &&
+          (nb.road || nb.bridge === 'ROAD' || nb.depot === 'ROAD' || nb.stationId)
+        ) {
+          return true;
+        }
+        if (
+          (tile.rail || tile.depot === 'RAIL' || tile.stationId) &&
+          (nb.rail || nb.bridge === 'RAIL' || nb.depot === 'RAIL' || nb.stationId)
+        ) {
+          return true;
+        }
+        return false;
+      };
+      const rawY = getSurfaceHeightAt(state, clampedX, clampedZ);
+      const hasX = adjShoreX || (hasTransport && (sharesNet(nW) || sharesNet(nE)));
+      const hasZ = adjShoreZ || (hasTransport && (sharesNet(nN) || sharesNet(nS)));
+      let bestY = rawY;
+      if (hasX) {
+        const u = Math.max(0, Math.min(1, clampedX - (rx - 0.5)));
+        bestY = Math.max(bestY, longWestY + (longEastY - longWestY) * u);
+      }
+      if (hasZ) {
+        const v = Math.max(0, Math.min(1, clampedZ - (rz - 0.5)));
+        bestY = Math.max(bestY, longNorthY + (longSouthY - longNorthY) * v);
+      }
+      return bestY;
     }
   }
 
@@ -258,12 +377,20 @@ export function getTravelSurfaceHeightAt(
 }
 
 export function getTileSurfaceY(
-  tile: Pick<Tile, 'x' | 'y' | 'terrain' | 'elevation' | 'bridge'> | undefined | null,
+  tile:
+    | (Pick<Tile, 'x' | 'y' | 'terrain' | 'elevation' | 'bridge'> & {
+        bridgeElevation?: number;
+      })
+    | undefined
+    | null,
   state?: Pick<GameState, 'mapSize' | 'tiles'>
 ): number {
   if (!tile) return ELEV_STEP;
   if (tile.bridge === 'ROAD' || tile.bridge === 'RAIL') {
-    return BRIDGE_DECK_Y;
+    if (state) {
+      return getBridgeDeckY(state, tile as Tile);
+    }
+    return Math.max(1, tile.bridgeElevation ?? 1) * ELEV_STEP;
   }
   if (tile.terrain === 'WATER' && tile.elevation <= 0) {
     return WATER_SURFACE_Y;
@@ -1050,6 +1177,8 @@ export class IsoSceneManager {
         Boolean(firstTile && firstTile.terrain !== 'WATER' && !firstTile.industryId) &&
         Boolean(lastTile && lastTile.terrain !== 'WATER' && !lastTile.industryId);
 
+      const previewDeckY =
+        Math.max(1, firstTile?.elevation ?? 1, lastTile?.elevation ?? 1) * ELEV_STEP;
       const desiredBridgeKind =
         activeTool === 'RAIL' || activeTool === 'RAIL_BRIDGE' ? 'RAIL' : 'ROAD';
 
@@ -1065,11 +1194,16 @@ export class IsoSceneManager {
           if (isWaterTile) {
             const bridgeConflict = tile.bridge && tile.bridge !== desiredBridgeKind;
             canBuild = isBridgeSpanValid && !bridgeConflict;
-            if (canBuild || tile.bridge) {
-              flatY = BRIDGE_DECK_Y;
+            if (canBuild) {
+              flatY = previewDeckY;
+            } else if (tile.bridge) {
+              flatY = getBridgeDeckY(state, tile);
             }
           } else {
             canBuild = true;
+            if (isBridgeSpanValid && (i === 0 || i === count - 1)) {
+              flatY = Math.max(tile.elevation, 1) * ELEV_STEP;
+            }
           }
         }
 
@@ -1150,7 +1284,9 @@ export class IsoSceneManager {
     }
 
     const hoverFlatY =
-      tile.bridge === 'ROAD' || tile.bridge === 'RAIL' ? BRIDGE_DECK_Y : undefined;
+      tile.bridge === 'ROAD' || tile.bridge === 'RAIL'
+        ? getBridgeDeckY(state, tile)
+        : undefined;
 
     this.writeSlopedTileQuadAndOutline(
       state,

@@ -1,7 +1,7 @@
 import React from 'react';
 import { HelpCircle, Crosshair } from 'lucide-react';
-import type { CargoType, GameState, TileInspectionInfo } from '../../types/game';
-import type { GameEngine } from '../../core';
+import type { BridgeType, CargoType, GameState, TileInspectionInfo } from '../../types/game';
+import { BRIDGE_CATALOG, type GameEngine } from '../../core';
 import {
   CARGO_COLORS,
   CARGO_LABELS_NO,
@@ -34,7 +34,7 @@ const ALL_CARGOS: CargoType[] = [
 
 export const LandInfoWindow: React.FC<LandInfoWindowProps> = ({
   engine,
-  state: _state,
+  state,
   coords,
   zIndex,
   onFocus,
@@ -46,6 +46,13 @@ export const LandInfoWindow: React.FC<LandInfoWindowProps> = ({
   if (!info) {
     return null;
   }
+
+  const rawTile =
+    state.tiles[coords.y * state.mapSize + coords.x] ??
+    state.tiles.find((t) => t.x === coords.x && t.y === coords.y);
+  const bridgeType: BridgeType =
+    info.bridgeType ?? rawTile?.bridgeType ?? 'STEEL';
+  const bridgeSpec = info.bridge ? BRIDGE_CATALOG[bridgeType] : null;
 
   const waitingEntries = info.waitingCargo
     ? ALL_CARGOS.filter((c) => (info.waitingCargo?.[c] ?? 0) > 0)
@@ -86,13 +93,21 @@ export const LandInfoWindow: React.FC<LandInfoWindowProps> = ({
           <strong className="text-sky-300 text-right">{info.ownerName}</strong>
         </div>
 
-        {info.bridge && (
-          <div className="flex justify-between gap-2 border-b border-black/30 pb-1">
-            <span className="text-slate-300">Bru-konstruksjon:</span>
-            <strong className="text-cyan-300 text-right">
-              {info.bridge === 'RAIL' ? 'Jernbanebru over vann' : 'Veibru over vann'}
-            </strong>
-          </div>
+        {info.bridge && bridgeSpec && (
+          <>
+            <div className="flex justify-between gap-2 border-b border-black/30 pb-1">
+              <span className="text-slate-300">Bru-konstruksjon:</span>
+              <strong className="text-cyan-300 text-right">
+                {bridgeSpec.nameNo} ({info.bridge === 'RAIL' ? 'Jernbane' : 'Vei'})
+              </strong>
+            </div>
+            <div className="flex justify-between gap-2 border-b border-black/30 pb-1">
+              <span className="text-slate-300">Brukvalitet & fart:</span>
+              <strong className="text-amber-200 text-right">
+                {bridgeSpec.qualityLabelNo} • Maks {bridgeSpec.maxSpeedKmh} km/t
+              </strong>
+            </div>
+          </>
         )}
 
         {info.townName && (

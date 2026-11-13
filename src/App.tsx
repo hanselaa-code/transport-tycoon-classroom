@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  BridgeType,
   GameSpeed,
   GameState,
   RemotePlayerWorldSlice,
@@ -30,6 +31,10 @@ import {
   subscribeToWorldPeers,
 } from './firebase/multiplayer';
 import { StartLobbyScreen } from './ui/StartLobbyScreen';
+import {
+  BridgePickerModal,
+  type PendingBridgeDragRequest,
+} from './ui/BridgePickerModal';
 import { TopToolbar, type WindowId } from './ui/TopToolbar';
 import { BottomStatusBar } from './ui/BottomStatusBar';
 import { ConstructionPalette } from './ui/ConstructionPalette';
@@ -133,6 +138,10 @@ export const App: React.FC = () => {
     y: number;
   } | null>(null);
   const [stationLength, setStationLength] = useState<number>(2);
+  const [selectedBridgeType, setSelectedBridgeType] =
+    useState<BridgeType>('STEEL');
+  const [pendingBridgeDrag, setPendingBridgeDrag] =
+    useState<PendingBridgeDragRequest | null>(null);
   const [mapRotation, setMapRotation] = useState<number>(0);
   const [zoomCommand, setZoomCommand] = useState<{
     type: 'IN' | 'OUT';
@@ -866,6 +875,7 @@ export const App: React.FC = () => {
           engine={engine}
           state={state}
           activeTool={activeTool}
+          selectedBridgeType={selectedBridgeType}
           mapRotation={mapRotation}
           zoomCommand={zoomCommand}
           focusTile={focusTile}
@@ -874,8 +884,32 @@ export const App: React.FC = () => {
           onDepotClick={handleDepotClick}
           onStationClick={handleStationClick}
           onVehicleClick={handleVehicleClick}
+          onRequestBridgeChoice={(req) => setPendingBridgeDrag(req)}
         />
       </div>
+
+      {/* Classic TTD 3-Bridge Selection Modal on Water Span Drag */}
+      {pendingBridgeDrag && (
+        <BridgePickerModal
+          engine={engine}
+          state={state}
+          request={pendingBridgeDrag}
+          selectedBridgeType={selectedBridgeType}
+          onSelectAndBuild={(bType) => {
+            setSelectedBridgeType(bType);
+            engine.applyDragTrackOrRoad(
+              pendingBridgeDrag.fromX,
+              pendingBridgeDrag.fromY,
+              pendingBridgeDrag.toX,
+              pendingBridgeDrag.toY,
+              pendingBridgeDrag.tool,
+              bType
+            );
+            setPendingBridgeDrag(null);
+          }}
+          onCancel={() => setPendingBridgeDrag(null)}
+        />
+      )}
 
       {/* Top Transport Tycoon Toolbar */}
       <TopToolbar
@@ -907,11 +941,13 @@ export const App: React.FC = () => {
           mode="RAIL"
           activeTool={activeTool}
           stationLength={stationLength}
+          selectedBridgeType={selectedBridgeType}
           zIndex={getZIndex('rail_palette')}
           onFocus={bringToFront}
           onClose={closeWindow}
           onSelectTool={handleSelectTool}
           onSetStationLength={setStationLength}
+          onSelectBridgeType={setSelectedBridgeType}
         />
       )}
 
@@ -920,11 +956,13 @@ export const App: React.FC = () => {
           mode="ROAD"
           activeTool={activeTool}
           stationLength={stationLength}
+          selectedBridgeType={selectedBridgeType}
           zIndex={getZIndex('road_palette')}
           onFocus={bringToFront}
           onClose={closeWindow}
           onSelectTool={handleSelectTool}
           onSetStationLength={setStationLength}
+          onSelectBridgeType={setSelectedBridgeType}
         />
       )}
 

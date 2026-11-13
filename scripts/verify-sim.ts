@@ -15,7 +15,10 @@ import {
 } from '../src/formulas';
 import {
   ALL_CARGO_TYPES,
+  BRIDGE_CATALOG,
+  BRIDGE_TYPES_ORDER,
   BUILD_COSTS,
+  type BridgeType,
   GameEngine,
   HQ_TIERS,
   INITIAL_CORPORATE_CASH_KR,
@@ -36,7 +39,9 @@ import {
 } from '../src/core';
 import {
   BRIDGE_DECK_Y,
+  ELEV_STEP,
   WATER_SURFACE_Y,
+  getBridgeDeckY,
   getCornerHeight,
   getSurfaceHeightAt,
   getTileCornerHeights,
@@ -1230,8 +1235,8 @@ async function main(): Promise<void> {
 
   // 10a. Bridge build costs, ROAD_BRIDGE, RAIL_BRIDGE, auto-bridge on straight drag,
   //      getTravelSurfaceHeightAt, bulldoze revert, and cargo delivery across a water bridge
-  assertEq(BUILD_COSTS.ROAD_BRIDGE, 12_000, 'BUILD_COSTS.ROAD_BRIDGE === 12 000 kr');
-  assertEq(BUILD_COSTS.RAIL_BRIDGE, 18_000, 'BUILD_COSTS.RAIL_BRIDGE === 18 000 kr');
+  assertEq(BUILD_COSTS.ROAD_BRIDGE, 13_500, 'BUILD_COSTS.ROAD_BRIDGE === 13 500 kr (STEEL default)');
+  assertEq(BUILD_COSTS.RAIL_BRIDGE, 19_000, 'BUILD_COSTS.RAIL_BRIDGE === 19 000 kr (STEEL default)');
   assert(
     BUILD_COSTS.ROAD_BRIDGE > BUILD_COSTS.ROAD,
     'ROAD_BRIDGE is more expensive than normal ROAD'
@@ -1270,6 +1275,8 @@ async function main(): Promise<void> {
       t.signal = false;
       t.bridge = null;
       t.bridgeAxis = undefined;
+      t.bridgeType = null;
+      t.bridgeElevation = undefined;
       if (cx >= 25 && cx <= 27) {
         t.terrain = 'WATER';
         t.elevation = 0;
@@ -1288,9 +1295,14 @@ async function main(): Promise<void> {
     'ROAD_BRIDGE preview spans 3 water tiles + 2 shore approach tiles'
   );
   assertEq(
+    roadBridgePreview.bridgeTileCount,
+    3,
+    'ROAD_BRIDGE preview bridgeTileCount === 3'
+  );
+  assertEq(
     roadBridgePreview.cost,
     3 * BUILD_COSTS.ROAD_BRIDGE + 2 * BUILD_COSTS.ROAD,
-    'ROAD_BRIDGE preview cost equals 3 * 12 000 + 2 * 2 500 = 41 000 kr'
+    'ROAD_BRIDGE preview cost equals 3 * 13 500 + 2 * 2 500 = 45 500 kr'
   );
 
   const cashBeforeRoadBridge = bridgeEngine.getState().corporate.cash;
@@ -1298,8 +1310,8 @@ async function main(): Promise<void> {
   assert(buildRoadBridgeRes.ok, `Explicit ROAD_BRIDGE succeeded: ${buildRoadBridgeRes.message}`);
   assertEq(
     cashBeforeRoadBridge - bridgeEngine.getState().corporate.cash,
-    41_000,
-    'Explicit ROAD_BRIDGE deducted exact 41 000 kr from corporate cash'
+    45_500,
+    'Explicit ROAD_BRIDGE deducted exact 45 500 kr from corporate cash'
   );
 
   for (const wx of [25, 26, 27]) {
@@ -1320,20 +1332,13 @@ async function main(): Promise<void> {
     `BRIDGE_DECK_Y (${BRIDGE_DECK_Y.toFixed(3)}) is elevated well above WATER_SURFACE_Y (${WATER_SURFACE_Y})`
   );
 
-  // Verify shore abutment ramp interpolates smoothly toward BRIDGE_DECK_Y on shore tile (24, 20)
+  // Verify level-1 shore approach stays seamlessly flat at BRIDGE_DECK_Y === ELEV_STEP (zero dip/hump)
   const shoreCenterY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24, 20);
   const shoreMidRampY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24.25, 20);
   const shoreEdgeY = getTravelSurfaceHeightAt(bridgeEngine.getState(), 24.49, 20);
-  assert(
-    shoreMidRampY > shoreCenterY && shoreEdgeY > shoreMidRampY,
-    `Shore abutment ramp rises smoothly from ${shoreCenterY.toFixed(3)} -> ${shoreMidRampY.toFixed(3)} -> ${shoreEdgeY.toFixed(3)}`
-  );
-  assertNear(
-    shoreEdgeY,
-    BRIDGE_DECK_Y,
-    0.02,
-    'Shore abutment ramp reaches BRIDGE_DECK_Y at water edge'
-  );
+  assertNear(shoreCenterY, BRIDGE_DECK_Y, 1e-4, 'Level-1 shore center matches BRIDGE_DECK_Y');
+  assertNear(shoreMidRampY, BRIDGE_DECK_Y, 1e-4, 'Level-1 shore mid-tile matches BRIDGE_DECK_Y');
+  assertNear(shoreEdgeY, BRIDGE_DECK_Y, 1e-4, 'Level-1 shore water edge matches BRIDGE_DECK_Y');
 
   // Verify bulldozing water bridge tiles cleanly reverts to plain WATER
   for (const wx of [25, 26, 27]) {
@@ -1342,6 +1347,7 @@ async function main(): Promise<void> {
     const reverted = bridgeEngine.getState().tiles[tileIndex(wx, 20, 64)];
     assertEq(reverted.terrain, 'WATER', `Bulldozed bridge tile (${wx},20) reverted to WATER`);
     assert(!reverted.bridge, `Bulldozed bridge tile (${wx},20) cleared tile.bridge`);
+    assert(!reverted.bridgeType, `Bulldozed bridge tile (${wx},20) cleared tile.bridgeType`);
     assert(!reverted.road && !reverted.rail, `Bulldozed bridge tile (${wx},20) cleared road/rail`);
   }
 
@@ -1351,7 +1357,7 @@ async function main(): Promise<void> {
   assertEq(
     explicitRailBridgeRes.cost,
     3 * BUILD_COSTS.RAIL_BRIDGE + 2 * BUILD_COSTS.RAIL,
-    'Explicit RAIL_BRIDGE cost === 3 * 18 000 + 2 * 4 500 = 63 000 kr'
+    'Explicit RAIL_BRIDGE cost === 3 * 19 000 + 2 * 4 500 = 66 000 kr'
   );
 
   // Auto-bridge: dragging plain 'RAIL' straight from (20,22) on west bank to (32,22) on east bank across water x=25..27!
@@ -1736,6 +1742,366 @@ async function main(): Promise<void> {
 
   console.log(
     '  [OK] Road/Rail bridges, cargo delivery across bridge, 128/160 maps, AI toggle, multiplayer sync & world bucket/auth rules verified.'
+  );
+
+  // =========================================================================
+  // 11. Round 6 Bridges: Zero-"Dumpel" Seamless Profile & 3 Bridge Tiers
+  // =========================================================================
+  section('11. Round 6 Bridges: Zero-"Dumpel" Seamless Profile & 3 Bridge Tiers (WOOD, STEEL, MODERN)');
+
+  // 11a. Mathematical Zero-"Dumpel" Verification (Level-1 Shores & Uneven Elev 1 -> Elev 2 Shores)
+  assertEq(BRIDGE_DECK_Y, ELEV_STEP, 'BRIDGE_DECK_Y === ELEV_STEP (0.28) for seamless level-1 approaches');
+  assertEq(
+    BRIDGE_TYPES_ORDER.join(','),
+    'WOOD,STEEL,MODERN',
+    'BRIDGE_TYPES_ORDER === [WOOD, STEEL, MODERN]'
+  );
+  assertEq(BRIDGE_CATALOG.WOOD.roadCostPerTile, 7_500, 'WOOD roadCostPerTile === 7 500 kr');
+  assertEq(BRIDGE_CATALOG.WOOD.railCostPerTile, 10_500, 'WOOD railCostPerTile === 10 500 kr');
+  assertEq(BRIDGE_CATALOG.WOOD.maxSpeedKmh, 55, 'WOOD maxSpeedKmh === 55 km/t');
+  assertEq(BRIDGE_CATALOG.STEEL.roadCostPerTile, 13_500, 'STEEL roadCostPerTile === 13 500 kr');
+  assertEq(BRIDGE_CATALOG.STEEL.railCostPerTile, 19_000, 'STEEL railCostPerTile === 19 000 kr');
+  assertEq(BRIDGE_CATALOG.STEEL.maxSpeedKmh, 110, 'STEEL maxSpeedKmh === 110 km/t');
+  assertEq(BRIDGE_CATALOG.MODERN.roadCostPerTile, 24_000, 'MODERN roadCostPerTile === 24 000 kr');
+  assertEq(BRIDGE_CATALOG.MODERN.railCostPerTile, 32_000, 'MODERN railCostPerTile === 32 000 kr');
+  assertEq(BRIDGE_CATALOG.MODERN.maxSpeedKmh, 240, 'MODERN maxSpeedKmh === 240 km/t');
+
+  const r6Engine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260601,
+    },
+  });
+  r6Engine.grantDevFunds('corporate', 20_000_000);
+  const r6State = r6Engine.getState();
+
+  // Prepare clean test arena in rows y=10..42, cols x=10..52
+  for (let cy = 8; cy <= 44; cy++) {
+    for (let cx = 8; cx <= 54; cx++) {
+      const t = r6State.tiles[tileIndex(cx, cy, 64)];
+      t.industryId = undefined;
+      t.townId = undefined;
+      t.buildingTier = undefined;
+      t.stationId = undefined;
+      t.depot = null;
+      t.hqOwnerId = null;
+      t.ownerId = null;
+      t.road = false;
+      t.rail = false;
+      t.signal = false;
+      t.bridge = null;
+      t.bridgeAxis = undefined;
+      t.bridgeType = null;
+      t.bridgeElevation = undefined;
+      t.terrain = 'GRASS';
+      t.elevation = 1;
+    }
+  }
+
+  // Carve a 3-tile water channel at x=25..27 across rows y=12..22 with coastal SAND shores at x=24 & x=28 (elev=1)
+  for (let cy = 12; cy <= 22; cy++) {
+    r6State.tiles[tileIndex(24, cy, 64)].terrain = 'SAND';
+    r6State.tiles[tileIndex(24, cy, 64)].elevation = 1;
+    r6State.tiles[tileIndex(28, cy, 64)].terrain = 'SAND';
+    r6State.tiles[tileIndex(28, cy, 64)].elevation = 1;
+    for (let wx = 25; wx <= 27; wx++) {
+      const wt = r6State.tiles[tileIndex(wx, cy, 64)];
+      wt.terrain = 'WATER';
+      wt.elevation = 0;
+    }
+  }
+
+  // Build bridge on row y=14 from inland (22,14) -> shore (24,14) -> water (25..27,14) -> shore (28,14) -> inland (30,14)
+  const flatProfileRes = r6Engine.applyDragTrackOrRoad(22, 14, 30, 14, 'ROAD', 'MODERN');
+  assert(flatProfileRes.ok, `Built level-1 shore-to-shore MODERN road bridge: ${flatProfileRes.message}`);
+
+  // Sample every 0.1 tiles across [inland x=23.0 -> shore x=24 -> water bridge x=25..27 -> shore x=28 -> inland x=29.0]
+  for (let step = 0; step <= 60; step++) {
+    const sampleX = 23.0 + step * 0.1;
+    const yVal = getTravelSurfaceHeightAt(r6Engine.getState(), sampleX, 14);
+    assert(
+      Math.abs(yVal - ELEV_STEP) < 0.0001,
+      `Zero-"dumpel" flat profile at x=${sampleX.toFixed(1)}, z=14: expected ${ELEV_STEP}, got ${yVal.toFixed(6)}`
+    );
+  }
+
+  // Also verify zero-"dumpel" even when ONLY shore-to-shore (24..28) is built before inland road exists (row y=16)!
+  const shoreOnlyRes = r6Engine.applyDragTrackOrRoad(24, 16, 28, 16, 'ROAD_BRIDGE', 'WOOD');
+  assert(shoreOnlyRes.ok, 'Built shore-only WOOD road bridge at y=16');
+  for (let step = 0; step <= 48; step++) {
+    const sampleX = 23.6 + step * 0.1;
+    const yVal = getTravelSurfaceHeightAt(r6Engine.getState(), sampleX, 16);
+    assert(
+      Math.abs(yVal - ELEV_STEP) < 0.0001,
+      `Zero-"dumpel" shore-only profile at x=${sampleX.toFixed(1)}, z=16: expected ${ELEV_STEP}, got ${yVal.toFixed(6)}`
+    );
+  }
+
+  // Uneven shores test (row y=30): west shore elevation = 1 (x=20..24), water (x=25..27), east plateau elevation = 2 (x=28..34)
+  for (let cy = 28; cy <= 32; cy++) {
+    for (let wx = 25; wx <= 27; wx++) {
+      r6State.tiles[tileIndex(wx, cy, 64)].terrain = 'WATER';
+      r6State.tiles[tileIndex(wx, cy, 64)].elevation = 0;
+    }
+    for (let ex = 28; ex <= 34; ex++) {
+      r6State.tiles[tileIndex(ex, cy, 64)].terrain = 'GRASS';
+      r6State.tiles[tileIndex(ex, cy, 64)].elevation = 2;
+    }
+  }
+  const unevenBridgeRes = r6Engine.applyDragTrackOrRoad(22, 30, 32, 30, 'RAIL', 'STEEL');
+  assert(unevenBridgeRes.ok, 'Built uneven-shore (elev 1 -> elev 2) STEEL rail bridge at y=30');
+
+  for (const wx of [25, 26, 27]) {
+    const bt = r6Engine.getState().tiles[tileIndex(wx, 30, 64)];
+    assertEq(bt.bridgeElevation, 2, `Uneven bridge tile (${wx},30) stores bridgeElevation === 2`);
+    assertNear(
+      getBridgeDeckY(r6Engine.getState(), bt),
+      2 * ELEV_STEP,
+      1e-5,
+      `getBridgeDeckY on (${wx},30) equals 2 * ELEV_STEP (${2 * ELEV_STEP})`
+    );
+  }
+
+  let prevUnevenY = getTravelSurfaceHeightAt(r6Engine.getState(), 23.0, 30);
+  assertNear(prevUnevenY, ELEV_STEP, 1e-4, 'Uneven profile starts at 1 * ELEV_STEP on west inland');
+  for (let step = 1; step <= 80; step++) {
+    const sampleX = 23.0 + step * 0.1;
+    const curY = getTravelSurfaceHeightAt(r6Engine.getState(), sampleX, 30);
+    assert(
+      curY >= prevUnevenY - 1e-6,
+      `Uneven shore-to-bridge profile is strictly monotonic non-decreasing at x=${sampleX.toFixed(1)} (${prevUnevenY.toFixed(5)} -> ${curY.toFixed(5)})`
+    );
+    prevUnevenY = curY;
+  }
+  assertNear(prevUnevenY, 2 * ELEV_STEP, 1e-4, 'Uneven profile finishes at 2 * ELEV_STEP on east plateau');
+
+  // 11b. All 3 Bridge Tiers (WOOD, STEEL, MODERN) across ROAD & RAIL + Short (2-tile) & Long (6-tile) Spans
+  // Carve a 2-tile water channel (x=38..39, y=12..18) and a 6-tile fjord (x=43..48, y=12..24)
+  for (let cy = 12; cy <= 24; cy++) {
+    for (const wx of [38, 39]) {
+      r6State.tiles[tileIndex(wx, cy, 64)].terrain = 'WATER';
+      r6State.tiles[tileIndex(wx, cy, 64)].elevation = 0;
+    }
+    for (let wx = 43; wx <= 48; wx++) {
+      r6State.tiles[tileIndex(wx, cy, 64)].terrain = 'WATER';
+      r6State.tiles[tileIndex(wx, cy, 64)].elevation = 0;
+    }
+  }
+
+  const tierTestRows: Array<{
+    y: number;
+    fromX: number;
+    toX: number;
+    waterSpan: number;
+    network: 'ROAD' | 'RAIL';
+    tool: 'ROAD_BRIDGE' | 'RAIL_BRIDGE';
+    bridgeType: BridgeType;
+  }> = [
+    { y: 12, fromX: 42, toX: 49, waterSpan: 6, network: 'ROAD', tool: 'ROAD_BRIDGE', bridgeType: 'WOOD' },
+    { y: 14, fromX: 42, toX: 49, waterSpan: 6, network: 'ROAD', tool: 'ROAD_BRIDGE', bridgeType: 'STEEL' },
+    { y: 16, fromX: 37, toX: 40, waterSpan: 2, network: 'ROAD', tool: 'ROAD_BRIDGE', bridgeType: 'MODERN' },
+    { y: 18, fromX: 42, toX: 49, waterSpan: 6, network: 'RAIL', tool: 'RAIL_BRIDGE', bridgeType: 'WOOD' },
+    { y: 20, fromX: 42, toX: 49, waterSpan: 6, network: 'RAIL', tool: 'RAIL_BRIDGE', bridgeType: 'STEEL' },
+    { y: 22, fromX: 42, toX: 49, waterSpan: 6, network: 'RAIL', tool: 'RAIL_BRIDGE', bridgeType: 'MODERN' },
+  ];
+
+  for (const tc of tierTestRows) {
+    const spec = BRIDGE_CATALOG[tc.bridgeType];
+    const perWaterTile = tc.network === 'ROAD' ? spec.roadCostPerTile : spec.railCostPerTile;
+    const perLandTile = tc.network === 'ROAD' ? BUILD_COSTS.ROAD : BUILD_COSTS.RAIL;
+    const expectedCost = tc.waterSpan * perWaterTile + 2 * perLandTile;
+
+    const prev = r6Engine.previewDragPath(tc.fromX, tc.y, tc.toX, tc.y, tc.tool, tc.bridgeType);
+    assert(prev.ok, `Preview ok for ${tc.bridgeType} ${tc.network} (${tc.waterSpan} water tiles)`);
+    assertEq(prev.bridgeTileCount, tc.waterSpan, `Preview bridgeTileCount === ${tc.waterSpan}`);
+    assertEq(prev.cost, expectedCost, `Preview cost for ${tc.bridgeType} ${tc.network} === ${expectedCost}`);
+
+    const beforeCash = r6Engine.getState().corporate.cash;
+    const res = r6Engine.applyDragTrackOrRoad(tc.fromX, tc.y, tc.toX, tc.y, tc.tool, tc.bridgeType);
+    assert(res.ok, `Built ${tc.bridgeType} ${tc.network} bridge: ${res.message}`);
+    assertEq(
+      beforeCash - r6Engine.getState().corporate.cash,
+      expectedCost,
+      `Exact cost deducted for ${tc.bridgeType} ${tc.network}`
+    );
+
+    const sampleWaterX = tc.fromX + 1;
+    const wt = r6Engine.getState().tiles[tileIndex(sampleWaterX, tc.y, 64)];
+    assertEq(wt.bridgeType, tc.bridgeType, `Water tile stores bridgeType === ${tc.bridgeType}`);
+    assertEq(wt.bridgeElevation, 1, 'Water tile stores bridgeElevation === 1');
+
+    const info = r6Engine.inspectTile(sampleWaterX, tc.y);
+    assert(
+      info.descriptionNo.includes(spec.nameNo) && info.descriptionNo.includes(`${spec.maxSpeedKmh}`),
+      `inspectTile shows ${spec.nameNo} and ${spec.maxSpeedKmh} km/t (${info.descriptionNo})`
+    );
+  }
+
+  // Test in-place bridge upgrade: upgrade row y=12 (6-tile WOOD road bridge) to MODERN road bridge!
+  const upgradeDiffCost =
+    6 * (BRIDGE_CATALOG.MODERN.roadCostPerTile - BRIDGE_CATALOG.WOOD.roadCostPerTile);
+  const upgPrev = r6Engine.previewDragPath(42, 12, 49, 12, 'ROAD_BRIDGE', 'MODERN');
+  assert(upgPrev.ok && upgPrev.bridgeTileCount === 6, 'In-place WOOD -> MODERN upgrade preview valid');
+  assertEq(upgPrev.cost, upgradeDiffCost, `In-place upgrade preview charges exact delta (${upgradeDiffCost} kr)`);
+  const upgRes = r6Engine.applyDragTrackOrRoad(42, 12, 49, 12, 'ROAD_BRIDGE', 'MODERN');
+  assert(upgRes.ok, 'Upgraded WOOD road bridge to MODERN in place');
+  assertEq(
+    r6Engine.getState().tiles[tileIndex(44, 12, 64)].bridgeType,
+    'MODERN',
+    'Upgraded bridge tile now has bridgeType === MODERN'
+  );
+
+  // Sync TerrainInstancer across all 3 bridge architectures (WOOD, STEEL, short & long MODERN cable-stayed)
+  const r6TerrainInstancer = new TerrainInstancer();
+  r6TerrainInstancer.sync(r6Engine.getState());
+  assert(
+    r6TerrainInstancer.group.children.length > 0,
+    'TerrainInstancer synced WOOD, STEEL & short/long MODERN cable-stayed bridges cleanly'
+  );
+  r6TerrainInstancer.dispose();
+
+  // Verify Multiplayer Delta Sync preserves bridgeType (bt) & bridgeElevation (be) with zero undefineds
+  r6Engine.setLocalPlayerIdentity({
+    clientId: 'stu-bridge-mp',
+    ownerName: 'Ingrid',
+    companyName: 'Fjordbru AS',
+    playerColor: '#9333ea',
+  });
+  const r6Slice = r6Engine.exportMultiplayerSlice();
+  const rawSliceJson = JSON.stringify(r6Slice);
+  assert(!rawSliceJson.includes('undefined'), 'Multiplayer bridge slice serializes cleanly with no undefined');
+
+  const r6PeerReceiver = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260601,
+    },
+  });
+  r6PeerReceiver.syncMultiplayerPeers([r6Slice]);
+  const syncedModernRailTile = r6PeerReceiver.getState().tiles[tileIndex(45, 22, 64)];
+  assertEq(syncedModernRailTile.bridge, 'RAIL', 'Multiplayer peer synced bridge === RAIL');
+  assertEq(syncedModernRailTile.bridgeType, 'MODERN', 'Multiplayer peer synced bridgeType === MODERN');
+  assertEq(syncedModernRailTile.bridgeElevation, 1, 'Multiplayer peer synced bridgeElevation === 1');
+  const syncedUnevenBridgeTile = r6PeerReceiver.getState().tiles[tileIndex(26, 30, 64)];
+  assertEq(syncedUnevenBridgeTile.bridgeType, 'STEEL', 'Multiplayer peer synced STEEL bridgeType');
+  assertEq(syncedUnevenBridgeTile.bridgeElevation, 2, 'Multiplayer peer synced bridgeElevation === 2');
+
+  // 11c. Vehicle Speed Clamping on WOOD (<= 55 km/t), STEEL (<= 110 km/t) & MODERN (> 130 km/t)
+  const speedEngine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'very_low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260602,
+    },
+  });
+  speedEngine.grantDevFunds('corporate', 25_000_000);
+  const spState = speedEngine.getState();
+
+  for (let cy = 8; cy <= 26; cy++) {
+    for (let cx = 6; cx <= 58; cx++) {
+      const t = spState.tiles[tileIndex(cx, cy, 64)];
+      t.industryId = undefined;
+      t.townId = undefined;
+      t.buildingTier = undefined;
+      t.stationId = undefined;
+      t.depot = null;
+      t.hqOwnerId = null;
+      t.ownerId = null;
+      t.road = false;
+      t.rail = false;
+      t.signal = false;
+      t.bridge = null;
+      t.bridgeAxis = undefined;
+      t.bridgeType = null;
+      t.bridgeElevation = undefined;
+      if (cx >= 26 && cx <= 35) {
+        t.terrain = 'WATER';
+        t.elevation = 0;
+      } else {
+        t.terrain = 'GRASS';
+        t.elevation = 1;
+      }
+    }
+  }
+
+  const speedLanes: Array<{ row: number; bridgeType: BridgeType; trainId?: string }> = [
+    { row: 12, bridgeType: 'WOOD' },
+    { row: 17, bridgeType: 'STEEL' },
+    { row: 22, bridgeType: 'MODERN' },
+  ];
+
+  for (const lane of speedLanes) {
+    const trackRes = speedEngine.applyDragTrackOrRoad(8, lane.row, 54, lane.row, 'RAIL', lane.bridgeType);
+    assert(trackRes.ok, `Built speed test corridor for ${lane.bridgeType} rail bridge`);
+    const stARes = speedEngine.applyTool(8, lane.row, 'TRAIN_STATION', {
+      stationLength: 1,
+      orientation: 'X',
+    });
+    const stBRes = speedEngine.applyTool(54, lane.row, 'TRAIN_STATION', {
+      stationLength: 1,
+      orientation: 'X',
+    });
+    const depRes = speedEngine.applyTool(10, lane.row + 1, 'RAIL_DEPOT');
+    assert(stARes.ok && stBRes.ok && depRes.ok, `Built stations & depot for ${lane.bridgeType} lane`);
+
+    const buyRes = speedEngine.buyVehicle({
+      depotX: 10,
+      depotY: lane.row + 1,
+      modelId: 'LOCO_ELECTRIC', // 175 km/h max speed
+      cargoType: 'PASSENGERS',
+      wagonCount: 1,
+      orders: [stARes.stationId!, stBRes.stationId!],
+    });
+    assert(buyRes.ok && Boolean(buyRes.vehicleId), `Spawned LOCO_ELECTRIC on ${lane.bridgeType} lane`);
+    lane.trainId = buyRes.vehicleId;
+  }
+
+  const maxBridgeSpeedObserved: Record<BridgeType, number> = {
+    WOOD: 0,
+    STEEL: 0,
+    MODERN: 0,
+  };
+
+  for (let tick = 0; tick < 500; tick++) {
+    speedEngine.tick(1);
+    const curS = speedEngine.getState();
+    for (const lane of speedLanes) {
+      const tr = curS.vehicles.find((v) => v.id === lane.trainId)!;
+      // Interior water bridge tiles x=27..34 guarantee both curTile and nextTile are on the bridge
+      if (tr.x >= 27 && tr.x <= 34 && tr.nextX >= 27 && tr.nextX <= 34 && tr.y === lane.row) {
+        if (tr.speedKmh > maxBridgeSpeedObserved[lane.bridgeType]) {
+          maxBridgeSpeedObserved[lane.bridgeType] = tr.speedKmh;
+        }
+      }
+    }
+  }
+
+  assert(
+    maxBridgeSpeedObserved.WOOD > 0 && maxBridgeSpeedObserved.WOOD <= 55,
+    `WOOD bridge clamps LOCO_ELECTRIC speed <= 55 km/t (observed ${maxBridgeSpeedObserved.WOOD} km/t)`
+  );
+  assert(
+    maxBridgeSpeedObserved.STEEL > 55 && maxBridgeSpeedObserved.STEEL <= 110,
+    `STEEL bridge clamps LOCO_ELECTRIC speed <= 110 km/t and > WOOD (observed ${maxBridgeSpeedObserved.STEEL} km/t)`
+  );
+  assert(
+    maxBridgeSpeedObserved.MODERN > 130 && maxBridgeSpeedObserved.MODERN <= 175,
+    `MODERN bridge allows full LOCO_ELECTRIC speed > 130 km/t (observed ${maxBridgeSpeedObserved.MODERN} km/t)`
+  );
+
+  console.log(
+    `  [OK] Zero-"dumpel" seamless profile (0.0000 dip/hump), WOOD/STEEL/MODERN 3D spans, MP sync & speed caps (${maxBridgeSpeedObserved.WOOD}/${maxBridgeSpeedObserved.STEEL}/${maxBridgeSpeedObserved.MODERN} km/t) verified.`
   );
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }

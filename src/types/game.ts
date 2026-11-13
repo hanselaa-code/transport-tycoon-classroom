@@ -68,6 +68,18 @@ export type DemoRouteType = 'coal_rail' | 'wood_truck' | 'bus_line';
 
 export type TerrainType = 'WATER' | 'SAND' | 'GRASS' | 'FOREST_TREES';
 
+export type BridgeType = 'WOOD' | 'STEEL' | 'MODERN';
+
+export interface BridgeSpec {
+  id: BridgeType;
+  nameNo: string;
+  qualityLabelNo: string;
+  descriptionNo: string;
+  roadCostPerTile: number;
+  railCostPerTile: number;
+  maxSpeedKmh: number;
+}
+
 export interface Tile {
   x: number;
   y: number;
@@ -79,6 +91,8 @@ export interface Tile {
   signalBlocked?: boolean;
   bridge?: 'ROAD' | 'RAIL' | null;
   bridgeAxis?: 'X' | 'Y';
+  bridgeType?: BridgeType | null;
+  bridgeElevation?: number;
   depot?: 'ROAD' | 'RAIL' | null;
   stationId?: string | null;
   townId?: string | null;
@@ -331,6 +345,10 @@ export interface TileInspectionInfo {
   signal: boolean;
   bridge?: 'ROAD' | 'RAIL' | null;
   bridgeAxis?: 'X' | 'Y' | null;
+  bridgeType?: BridgeType | null;
+  bridgeElevation?: number | null;
+  bridgeMaxSpeedKmh?: number | null;
+  bridgeQualityNo?: string | null;
   depot: 'ROAD' | 'RAIL' | null;
   hqTier: number | null;
   ownerId: string | null;
@@ -370,6 +388,8 @@ export interface ModifiedTileDelta {
   signal?: boolean;
   bridge?: 'ROAD' | 'RAIL' | null;
   bridgeAxis?: 'X' | 'Y';
+  bt?: BridgeType;
+  be?: number;
   depot?: 'ROAD' | 'RAIL' | null;
   stationId?: string | null;
   hqOwnerId?: string | null;

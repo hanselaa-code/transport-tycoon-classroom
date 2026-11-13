@@ -5,6 +5,7 @@ import {
 } from '../formulas';
 import {
   ActionResult,
+  BridgeType,
   BuyVehicleParams,
   CargoType,
   DemoRouteType,
@@ -33,6 +34,7 @@ import {
 } from './aiCompetitors';
 import {
   ALL_CARGO_TYPES,
+  BRIDGE_CATALOG,
   BUILD_COSTS,
   calculateVehicleBaseAnnualCost,
   calculateVehicleCapacity,
@@ -105,9 +107,18 @@ const FULL_LOAD_MAX_WAIT_SUBTICKS = 120;
 
 export type DragTrackTool = 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE';
 
+export interface DragPreviewResult {
+  ok: boolean;
+  tiles: Array<{ x: number; y: number }>;
+  cost: number;
+  bridgeTileCount: number;
+  reason?: string;
+}
+
 export interface ApplyToolOptions {
   stationLength?: number;
   orientation?: 'X' | 'Y';
+  bridgeType?: BridgeType;
 }
 
 export interface GameEngineOptions {
@@ -594,9 +605,29 @@ export class GameEngine {
     const accelFactor = 0.36 + (accelStep / 4) * 0.64;
     const cornerFactor = isTurning ? 0.78 : 1.0;
 
-    const effectiveSpeedKmh = Math.max(
-      10,
-      Math.round(vehicle.maxSpeedKmh * slopeFactor * accelFactor * cornerFactor)
+    let bridgeSpeedCap = Infinity;
+    if (curTile.bridge) {
+      const bt: BridgeType = curTile.bridgeType ?? 'STEEL';
+      bridgeSpeedCap = Math.min(
+        bridgeSpeedCap,
+        (BRIDGE_CATALOG[bt] ?? BRIDGE_CATALOG.STEEL).maxSpeedKmh
+      );
+    }
+    if (nextTile.bridge) {
+      const bt: BridgeType = nextTile.bridgeType ?? 'STEEL';
+      bridgeSpeedCap = Math.min(
+        bridgeSpeedCap,
+        (BRIDGE_CATALOG[bt] ?? BRIDGE_CATALOG.STEEL).maxSpeedKmh
+      );
+    }
+
+    const cappedMaxSpeed = Math.min(vehicle.maxSpeedKmh, bridgeSpeedCap);
+    const effectiveSpeedKmh = Math.min(
+      bridgeSpeedCap,
+      Math.max(
+        10,
+        Math.round(cappedMaxSpeed * slopeFactor * accelFactor * cornerFactor)
+      )
     );
     vehicle.speedKmh = effectiveSpeedKmh;
 
@@ -915,6 +946,7 @@ export class GameEngine {
 
     if (tool === 'ROAD_BRIDGE' || tool === 'RAIL_BRIDGE') {
       // Allow single-clicking a 1-tile narrow water channel if dry land is on opposite sides
+      const chosenBridgeType = options?.bridgeType ?? 'STEEL';
       if (tile.terrain === 'WATER') {
         const horizLand =
           inBounds(rx - 1, ry, this.state.mapSize) &&
@@ -922,7 +954,7 @@ export class GameEngine {
           this.state.tiles[tileIndex(rx - 1, ry, this.state.mapSize)].terrain !== 'WATER' &&
           this.state.tiles[tileIndex(rx + 1, ry, this.state.mapSize)].terrain !== 'WATER';
         if (horizLand) {
-          return this.applyDragTrackOrRoad(rx - 1, ry, rx + 1, ry, tool);
+          return this.applyDragTrackOrRoad(rx - 1, ry, rx + 1, ry, tool, chosenBridgeType);
         }
         const vertLand =
           inBounds(rx, ry - 1, this.state.mapSize) &&
@@ -930,7 +962,7 @@ export class GameEngine {
           this.state.tiles[tileIndex(rx, ry - 1, this.state.mapSize)].terrain !== 'WATER' &&
           this.state.tiles[tileIndex(rx, ry + 1, this.state.mapSize)].terrain !== 'WATER';
         if (vertLand) {
-          return this.applyDragTrackOrRoad(rx, ry - 1, rx, ry + 1, tool);
+          return this.applyDragTrackOrRoad(rx, ry - 1, rx, ry + 1, tool, chosenBridgeType);
         }
       }
       return {
@@ -1212,6 +1244,8 @@ export class GameEngine {
       tile.signalBlocked = false;
       tile.bridge = null;
       tile.bridgeAxis = undefined;
+      tile.bridgeType = null;
+      tile.bridgeElevation = undefined;
       tile.depot = null;
       tile.stationId = null;
       tile.ownerId = null;
@@ -1270,12 +1304,15 @@ export class GameEngine {
 
   private planDragTrackOrBridge(
     rawPoints: GridPoint[],
-    tool: DragTrackTool
+    tool: DragTrackTool,
+    bridgeType: BridgeType = 'STEEL'
   ): Array<{
     x: number;
     y: number;
     isBridge: boolean;
     axis?: 'X' | 'Y';
+    bridgeElevation?: number;
+    needsApply?: boolean;
     cost: number;
   }> {
     const baseMode: 'RAIL' | 'ROAD' =
@@ -1342,6 +1379,7 @@ export class GameEngine {
 
     const validBridgeWaterIndices = new Set<number>();
     const bridgeShoreIndices = new Set<number>();
+    const spanElevationByIndex = new Map<number, number>();
 
     if (axis !== null && workingPts.length >= 3) {
       let i = 0;
@@ -1409,10 +1447,16 @@ export class GameEngine {
           }
 
           if (waterSpanClear) {
+            const spanBridgeElevation = Math.max(
+              1,
+              leftShore.elevation,
+              rightShore.elevation
+            );
             bridgeShoreIndices.add(wStart - 1);
             bridgeShoreIndices.add(wEnd + 1);
             for (let k = wStart; k <= wEnd; k++) {
               validBridgeWaterIndices.add(k);
+              spanElevationByIndex.set(k, spanBridgeElevation);
             }
           }
         }
@@ -1424,11 +1468,16 @@ export class GameEngine {
       y: number;
       isBridge: boolean;
       axis?: 'X' | 'Y';
+      bridgeElevation?: number;
+      needsApply?: boolean;
       cost: number;
     }> = [];
 
+    const selectedSpec = BRIDGE_CATALOG[bridgeType] ?? BRIDGE_CATALOG.STEEL;
     const bridgeUnitCost =
-      baseMode === 'RAIL' ? BUILD_COSTS.RAIL_BRIDGE : BUILD_COSTS.ROAD_BRIDGE;
+      baseMode === 'RAIL'
+        ? selectedSpec.railCostPerTile
+        : selectedSpec.roadCostPerTile;
 
     for (let idx = 0; idx < workingPts.length; idx++) {
       const pt = workingPts[idx];
@@ -1437,14 +1486,39 @@ export class GameEngine {
 
       if (tile.terrain === 'WATER') {
         if (!validBridgeWaterIndices.has(idx) || !axis) continue;
+        const spanElev = spanElevationByIndex.get(idx) ?? 1;
         const alreadySameBridge =
           tile.bridge === baseMode && tile.bridgeAxis === axis;
+
+        let tileCost = bridgeUnitCost;
+        let needsApply = true;
+
+        if (alreadySameBridge) {
+          const existingType: BridgeType = tile.bridgeType ?? 'STEEL';
+          const existingSpec =
+            BRIDGE_CATALOG[existingType] ?? BRIDGE_CATALOG.STEEL;
+          const existingUnitCost =
+            baseMode === 'RAIL'
+              ? existingSpec.railCostPerTile
+              : existingSpec.roadCostPerTile;
+
+          if (existingType !== bridgeType && bridgeUnitCost > existingUnitCost) {
+            tileCost = bridgeUnitCost - existingUnitCost;
+            needsApply = true;
+          } else {
+            tileCost = 0;
+            needsApply = false;
+          }
+        }
+
         planned.push({
           x: pt.x,
           y: pt.y,
           isBridge: true,
           axis,
-          cost: alreadySameBridge ? 0 : bridgeUnitCost,
+          bridgeElevation: spanElev,
+          needsApply,
+          cost: tileCost,
         });
       } else {
         if (isExplicitBridge && !bridgeShoreIndices.has(idx)) {
@@ -1469,48 +1543,90 @@ export class GameEngine {
     fromY: number,
     toX: number,
     toY: number,
-    tool: DragTrackTool
-  ): { tiles: Array<{ x: number; y: number }>; cost: number } {
+    tool: DragTrackTool,
+    bridgeType: BridgeType = 'STEEL'
+  ): DragPreviewResult {
+    const normalizedBridgeType: BridgeType =
+      bridgeType === 'WOOD' || bridgeType === 'STEEL' || bridgeType === 'MODERN'
+        ? bridgeType
+        : 'STEEL';
     const line = computeDragLineTiles(fromX, fromY, toX, toY, this.state.mapSize);
-    const planned = this.planDragTrackOrBridge(line, tool);
+    const planned = this.planDragTrackOrBridge(line, tool, normalizedBridgeType);
     const isExplicitBridge =
       tool === 'RAIL_BRIDGE' || tool === 'ROAD_BRIDGE';
-    if (isExplicitBridge && !planned.some((p) => p.isBridge)) {
-      return { tiles: [], cost: 0 };
+    const bridgeTileCount = planned.filter((p) => p.isBridge).length;
+
+    if (isExplicitBridge && bridgeTileCount === 0) {
+      return {
+        ok: false,
+        tiles: [],
+        cost: 0,
+        bridgeTileCount: 0,
+        reason: 'Dra broen i rett linje fra kyst til kyst over vannet (1–24 ruter).',
+      };
     }
+
     let cost = 0;
     const validTiles: Array<{ x: number; y: number }> = [];
     for (const item of planned) {
       validTiles.push({ x: item.x, y: item.y });
       cost += item.cost;
     }
-    return { tiles: validTiles, cost };
+
+    if (validTiles.length === 0) {
+      return {
+        ok: false,
+        tiles: [],
+        cost: 0,
+        bridgeTileCount: 0,
+        reason: 'Kan ikke bygge på denne traséen.',
+      };
+    }
+
+    return {
+      ok: true,
+      tiles: validTiles,
+      cost,
+      bridgeTileCount,
+    };
   }
 
   /**
    * Supports both:
-   * - `applyDragTrackOrRoad(fromX, fromY, toX, toY, 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE')`
-   * - `applyDragTrackOrRoad(tilesArray, 'RAIL' | 'ROAD' | 'RAIL_BRIDGE' | 'ROAD_BRIDGE')`
+   * - `applyDragTrackOrRoad(fromX, fromY, toX, toY, tool, bridgeType = 'STEEL')`
+   * - `applyDragTrackOrRoad(tilesArray, tool, bridgeType = 'STEEL')`
    */
   public applyDragTrackOrRoad(
     arg1: number | Array<{ x: number; y: number }>,
     arg2: number | DragTrackTool,
-    toX?: number,
+    arg3?: number | BridgeType,
     toY?: number,
-    toolArg?: DragTrackTool
+    toolArg?: DragTrackTool,
+    bridgeTypeArg?: BridgeType
   ): ActionResult {
     let points: GridPoint[];
     let tool: DragTrackTool;
+    let bridgeType: BridgeType = 'STEEL';
 
     if (Array.isArray(arg1)) {
       points = arg1;
       tool = typeof arg2 === 'string' ? arg2 : 'ROAD';
+      if (arg3 === 'WOOD' || arg3 === 'STEEL' || arg3 === 'MODERN') {
+        bridgeType = arg3;
+      }
     } else {
       const fx = arg1;
       const fy = typeof arg2 === 'number' ? arg2 : 0;
-      const tx = toX ?? fx;
+      const tx = typeof arg3 === 'number' ? arg3 : fx;
       const ty = toY ?? fy;
       tool = toolArg ?? 'ROAD';
+      if (
+        bridgeTypeArg === 'WOOD' ||
+        bridgeTypeArg === 'STEEL' ||
+        bridgeTypeArg === 'MODERN'
+      ) {
+        bridgeType = bridgeTypeArg;
+      }
       points = computeDragLineTiles(fx, fy, tx, ty, this.state.mapSize);
     }
 
@@ -1519,7 +1635,7 @@ export class GameEngine {
     const isExplicitBridge =
       tool === 'RAIL_BRIDGE' || tool === 'ROAD_BRIDGE';
 
-    const planned = this.planDragTrackOrBridge(points, tool);
+    const planned = this.planDragTrackOrBridge(points, tool, bridgeType);
     const hasBridgeSpan = planned.some((p) => p.isBridge);
 
     if (isExplicitBridge && !hasBridgeSpan) {
@@ -1548,7 +1664,7 @@ export class GameEngine {
       if (item.isBridge) {
         const tile =
           this.state.tiles[tileIndex(item.x, item.y, this.state.mapSize)];
-        if (item.cost > 0) {
+        if (item.needsApply && item.cost > 0) {
           if (this.state.corporate.cash < item.cost) break;
           this.state.corporate.cash -= item.cost;
           this.state.corporate.currentYearPnL.constructionCost += item.cost;
@@ -1556,6 +1672,8 @@ export class GameEngine {
           tile.elevation = 0;
           tile.bridge = baseMode;
           tile.bridgeAxis = item.axis;
+          tile.bridgeType = bridgeType;
+          tile.bridgeElevation = item.bridgeElevation ?? 1;
           tile.road = baseMode === 'ROAD';
           tile.rail = baseMode === 'RAIL';
           tile.signal = false;
@@ -1593,11 +1711,10 @@ export class GameEngine {
       this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
       recomputeValuationsAndWarnings(this.state);
       this.emit();
+      const bSpec = BRIDGE_CATALOG[bridgeType] ?? BRIDGE_CATALOG.STEEL;
       const label =
         bridgeBuiltCount > 0
-          ? baseMode === 'RAIL'
-            ? `jernbanebro (${bridgeBuiltCount} vannruter)`
-            : `veibro (${bridgeBuiltCount} vannruter)`
+          ? `${bSpec.nameNo.toLowerCase()} (${bridgeBuiltCount} vannruter)`
           : baseMode === 'RAIL'
             ? 'jernbane'
             : 'vei';
@@ -2047,6 +2164,11 @@ export class GameEngine {
       hqTier = tile.hqOwnerTier;
     }
 
+    let bridgeType: BridgeType | null = null;
+    let bridgeElevation: number | null = null;
+    let bridgeMaxSpeedKmh: number | null = null;
+    let bridgeQualityNo: string | null = null;
+
     let descriptionNo = terrainLabelNo;
     if (tile.hqOwnerId === 'player') {
       const hqSpec = getHQTierSpec(this.state.corporate.hqTier);
@@ -2054,10 +2176,15 @@ export class GameEngine {
     } else if (tile.hqOwnerId && remotePeerOwner) {
       const hqSpec = getHQTierSpec(hqTier ?? 1);
       descriptionNo = `Hovedkontor (${remotePeerOwner.companyName}): ${hqSpec ? hqSpec.nameNo : 'Nivå 1'}`;
-    } else if (tile.bridge === 'RAIL') {
-      descriptionNo = 'Jernbanebro over vann';
-    } else if (tile.bridge === 'ROAD') {
-      descriptionNo = 'Veibro over vann';
+    } else if (tile.bridge === 'RAIL' || tile.bridge === 'ROAD') {
+      const bt: BridgeType = tile.bridgeType ?? 'STEEL';
+      const bSpec = BRIDGE_CATALOG[bt] ?? BRIDGE_CATALOG.STEEL;
+      const netLabel = tile.bridge === 'RAIL' ? 'Jernbane' : 'Vei';
+      bridgeType = bt;
+      bridgeElevation = tile.bridgeElevation ?? 1;
+      bridgeMaxSpeedKmh = bSpec.maxSpeedKmh;
+      bridgeQualityNo = bSpec.qualityLabelNo;
+      descriptionNo = `${bSpec.nameNo} (${netLabel}) — ${bSpec.qualityLabelNo} • Maks ${bSpec.maxSpeedKmh} km/t`;
     } else if (station) {
       descriptionNo = `Stasjon: ${station.name}`;
     } else if (tile.depot === 'RAIL') {
@@ -2097,6 +2224,10 @@ export class GameEngine {
       signal: tile.signal,
       bridge: tile.bridge ?? null,
       bridgeAxis: tile.bridgeAxis ?? null,
+      bridgeType,
+      bridgeElevation,
+      bridgeMaxSpeedKmh,
+      bridgeQualityNo,
       depot: tile.depot ?? null,
       hqTier,
       ownerId: tile.ownerId ?? null,
@@ -2324,6 +2455,8 @@ export class GameEngine {
       if (t.bridge) {
         delta.bridge = t.bridge;
         if (t.bridgeAxis) delta.bridgeAxis = t.bridgeAxis;
+        delta.bt = t.bridgeType ?? 'STEEL';
+        delta.be = t.bridgeElevation ?? 1;
       }
       if (t.depot) delta.depot = t.depot;
       if (t.stationId) delta.stationId = t.stationId;
@@ -2491,6 +2624,8 @@ export class GameEngine {
           tile.elevation = 0;
           tile.bridge = mt.bridge;
           tile.bridgeAxis = mt.bridgeAxis ?? 'X';
+          tile.bridgeType = mt.bt ?? 'STEEL';
+          tile.bridgeElevation = mt.be ?? 1;
           tile.road = mt.bridge === 'ROAD';
           tile.rail = mt.bridge === 'RAIL';
           tile.ownerId = peerId;

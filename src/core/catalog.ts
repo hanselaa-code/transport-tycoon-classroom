@@ -1,4 +1,6 @@
 import {
+  BridgeSpec,
+  BridgeType,
   CargoType,
   HQTierSpec,
   IndustryType,
@@ -71,12 +73,44 @@ export const DEFAULT_WORLD_SETUP: WorldSetupConfig = {
   seed: 20261112,
 };
 
+export const BRIDGE_TYPES_ORDER: BridgeType[] = ['WOOD', 'STEEL', 'MODERN'];
+
+export const BRIDGE_CATALOG: Record<BridgeType, BridgeSpec> = {
+  WOOD: {
+    id: 'WOOD',
+    nameNo: 'Trebru',
+    qualityLabelNo: 'Enkel kvalitet',
+    descriptionNo: 'Rimelig bjelkebru på trepæler. Lav maksfart – passer for enkle lokalruter.',
+    roadCostPerTile: 7_500,
+    railCostPerTile: 10_500,
+    maxSpeedKmh: 55,
+  },
+  STEEL: {
+    id: 'STEEL',
+    nameNo: 'Stålfagverksbru',
+    qualityLabelNo: 'Middels kvalitet',
+    descriptionNo: 'Klassisk stålfagverks- og betongbru med solid kapasitet og god fart.',
+    roadCostPerTile: 13_500,
+    railCostPerTile: 19_000,
+    maxSpeedKmh: 110,
+  },
+  MODERN: {
+    id: 'MODERN',
+    nameNo: 'Moderne skråstagbru',
+    qualityLabelNo: 'Topp moderne',
+    descriptionNo: 'Eksklusiv hvit skråstagbru med høye tårn, skråkabler og fri toppfart!',
+    roadCostPerTile: 24_000,
+    railCostPerTile: 32_000,
+    maxSpeedKmh: 240,
+  },
+};
+
 export const BUILD_COSTS: Record<ToolType, number> = {
   SELECT: 0,
   ROAD: 2_500,
   RAIL: 4_500,
-  ROAD_BRIDGE: 12_000,
-  RAIL_BRIDGE: 18_000,
+  ROAD_BRIDGE: 13_500,
+  RAIL_BRIDGE: 19_000,
   ROAD_DEPOT: 35_000,
   RAIL_DEPOT: 55_000,
   BUS_STOP: 25_000,

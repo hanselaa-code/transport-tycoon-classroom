@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { BUILD_COSTS, type GameEngine } from '../core';
-import type { GameState, Tile, ToolType } from '../types/game';
+import type { BridgeType, GameState, Tile, ToolType } from '../types/game';
 import { FloatingPopups } from './FloatingPopups';
 import {
   IsoSceneManager,
@@ -19,6 +19,16 @@ export interface IsometricViewportProps {
   state: GameState;
   activeTool: ToolType;
   mapRotation: number; // 0 | 1 | 2 | 3 (90-degree steps)
+  selectedBridgeType?: BridgeType;
+  onRequestBridgeChoice?: (req: {
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    tool: 'ROAD' | 'RAIL' | 'ROAD_BRIDGE' | 'RAIL_BRIDGE';
+    network: 'ROAD' | 'RAIL';
+    bridgeTileCount: number;
+  }) => void;
   zoomCommand?: { type: 'IN' | 'OUT'; seq: number } | null;
   focusTile?: { x: number; y: number; seq: number } | null;
   selectedStationOrderPicker?: ((stationId: string) => void) | null;
@@ -100,6 +110,8 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
   state,
   activeTool,
   mapRotation,
+  selectedBridgeType,
+  onRequestBridgeChoice,
   zoomCommand,
   focusTile,
   selectedStationOrderPicker,
@@ -118,6 +130,8 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     state,
     activeTool,
     mapRotation,
+    selectedBridgeType,
+    onRequestBridgeChoice,
     selectedStationOrderPicker,
     onTileInteract,
     onDepotClick,
@@ -129,6 +143,8 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     state,
     activeTool,
     mapRotation,
+    selectedBridgeType,
+    onRequestBridgeChoice,
     selectedStationOrderPicker,
     onTileInteract,
     onDepotClick,
@@ -212,6 +228,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     let buildDragStart: { x: number; y: number } | null = null;
     let buildDragPreviewTiles: Array<{ x: number; y: number }> | null = null;
     let buildDragPreviewCost = 0;
+    let buildDragBridgeTiles = 0;
 
     const updateCursorHud = (clientX: number, clientY: number): void => {
       const hud = cursorHudRef.current;
@@ -241,13 +258,26 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         isDragBuildTool(cur.activeTool)
       ) {
         const toolName = TOOL_LABELS_NO[cur.activeTool];
-        label = `${toolName} (${buildDragPreviewTiles.length} ruter) — ${formatNorwegianInt(
+        const bridgeSuffix =
+          buildDragBridgeTiles > 0 ? `, ${buildDragBridgeTiles} bru` : '';
+        label = `${toolName} (${buildDragPreviewTiles.length} ruter${bridgeSuffix}) — ${formatNorwegianInt(
           buildDragPreviewCost
         )} kr`;
       } else if (cur.activeTool === 'ROAD_BRIDGE' || cur.activeTool === 'RAIL_BRIDGE') {
-        const cost = BUILD_COSTS?.[cur.activeTool] ?? (cur.activeTool === 'RAIL_BRIDGE' ? 18000 : 12000);
+        const bType = cur.selectedBridgeType ?? 'STEEL';
+        const isRailKind = cur.activeTool === 'RAIL_BRIDGE';
+        const costByTier =
+          bType === 'WOOD'
+            ? isRailKind
+              ? 10500
+              : 7500
+            : bType === 'MODERN'
+            ? isRailKind
+              ? 32000
+              : 24000
+            : BUILD_COSTS?.[cur.activeTool] ?? (isRailKind ? 19000 : 13500);
         const toolName = TOOL_LABELS_NO[cur.activeTool];
-        label = `${toolName} — ${formatNorwegianInt(cost)} kr/vannrute (dra fra bredd til bredd)`;
+        label = `${toolName} — ${formatNorwegianInt(costByTier)} kr/vannrute (dra fra bredd til bredd)`;
       } else if (cur.activeTool !== 'SELECT') {
         const cost = BUILD_COSTS?.[cur.activeTool] ?? 0;
         const toolName = TOOL_LABELS_NO[cur.activeTool];
@@ -275,29 +305,23 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       ) {
         buildDragPreviewTiles = null;
         buildDragPreviewCost = 0;
+        buildDragBridgeTiles = 0;
         return;
       }
 
-      const engineAny = cur.engine as unknown as {
-        previewDragPath?: (
-          fx: number,
-          fy: number,
-          tx: number,
-          ty: number,
-          tool: DragBuildTool
-        ) => { tiles: Array<{ x: number; y: number }>; cost: number };
-      };
-
-      if (typeof engineAny.previewDragPath === 'function') {
-        const preview = engineAny.previewDragPath(
+      const chosenBridgeType: BridgeType = cur.selectedBridgeType ?? 'STEEL';
+      if (typeof cur.engine.previewDragPath === 'function') {
+        const preview = cur.engine.previewDragPath(
           buildDragStart.x,
           buildDragStart.y,
           hoverTile.x,
           hoverTile.y,
-          cur.activeTool
+          cur.activeTool,
+          chosenBridgeType
         );
         buildDragPreviewTiles = preview.tiles;
         buildDragPreviewCost = preview.cost;
+        buildDragBridgeTiles = preview.bridgeTileCount ?? 0;
       } else {
         buildDragPreviewTiles = computeFallbackDragTiles(
           buildDragStart.x,
@@ -307,13 +331,31 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         );
         const isRailKind = cur.activeTool === 'RAIL' || cur.activeTool === 'RAIL_BRIDGE';
         const landCost = isRailKind ? 4500 : 2500;
-        const waterCost = isRailKind ? 18000 : 12000;
+        const waterCost =
+          chosenBridgeType === 'WOOD'
+            ? isRailKind
+              ? 10500
+              : 7500
+            : chosenBridgeType === 'MODERN'
+            ? isRailKind
+              ? 32000
+              : 24000
+            : isRailKind
+            ? 19000
+            : 13500;
         let est = 0;
+        let bCount = 0;
         for (const pt of buildDragPreviewTiles) {
           const qt = getTileAt(cur.state, pt.x, pt.y);
-          est += qt?.terrain === 'WATER' ? waterCost : landCost;
+          if (qt?.terrain === 'WATER') {
+            est += waterCost;
+            bCount++;
+          } else {
+            est += landCost;
+          }
         }
         buildDragPreviewCost = est;
+        buildDragBridgeTiles = bCount;
       }
     };
 
@@ -426,22 +468,52 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         buildDragStart = null;
         buildDragPreviewTiles = null;
         buildDragPreviewCost = 0;
+        buildDragBridgeTiles = 0;
 
         if (endPick) {
-          const dragFn = cur.engine.applyDragTrackOrRoad as unknown as (
-            fx: number,
-            fy: number,
-            tx: number,
-            ty: number,
-            tool: DragBuildTool
-          ) => { ok: boolean; message?: string };
-          const res = dragFn.call(
-            cur.engine,
+          const chosenBridgeType: BridgeType = cur.selectedBridgeType ?? 'STEEL';
+          const preview =
+            typeof cur.engine.previewDragPath === 'function'
+              ? cur.engine.previewDragPath(
+                  start.x,
+                  start.y,
+                  endPick.x,
+                  endPick.y,
+                  cur.activeTool,
+                  chosenBridgeType
+                )
+              : null;
+
+          if (
+            preview &&
+            preview.ok &&
+            preview.bridgeTileCount > 0 &&
+            cur.onRequestBridgeChoice
+          ) {
+            const network: 'ROAD' | 'RAIL' =
+              cur.activeTool === 'RAIL' || cur.activeTool === 'RAIL_BRIDGE'
+                ? 'RAIL'
+                : 'ROAD';
+            cur.onRequestBridgeChoice({
+              fromX: start.x,
+              fromY: start.y,
+              toX: endPick.x,
+              toY: endPick.y,
+              tool: cur.activeTool,
+              network,
+              bridgeTileCount: preview.bridgeTileCount,
+            });
+            updateCursorHud(ev.clientX, ev.clientY);
+            return;
+          }
+
+          const res = cur.engine.applyDragTrackOrRoad(
             start.x,
             start.y,
             endPick.x,
             endPick.y,
-            cur.activeTool
+            cur.activeTool,
+            chosenBridgeType
           );
           const nextState = cur.engine.getState();
           if (!res.ok && res.message) {

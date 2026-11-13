@@ -28,7 +28,9 @@ export function isTileTraversableForNetwork(
 }
 
 export function getEffectiveTrackElevation(tile: Tile): number {
-  return tile.bridge ? Math.max(1, tile.elevation) : tile.elevation;
+  return tile.bridge
+    ? Math.max(1, tile.bridgeElevation ?? 1, tile.elevation)
+    : tile.elevation;
 }
 
 /**

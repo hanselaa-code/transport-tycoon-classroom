@@ -13,6 +13,7 @@ import {
   VehicleModelId,
 } from '../types/game';
 import {
+  BRIDGE_CATALOG,
   calculateVehicleBaseAnnualCost,
   calculateVehicleCapacity,
   calculateVehiclePurchaseCost,
@@ -379,12 +380,33 @@ function layCorridorTiles(
       const adj = pts[i + 1] ?? pts[i - 1] ?? p;
       const axis: 'X' | 'Y' = Math.abs(adj.x - p.x) > 0 ? 'X' : 'Y';
       if (!t.bridge) {
+        let leftElev = 1;
+        for (let li = i - 1; li >= 0; li--) {
+          const lt = state.tiles[tileIndex(pts[li].x, pts[li].y, state.mapSize)];
+          if (lt.terrain !== 'WATER') {
+            leftElev = lt.elevation;
+            break;
+          }
+        }
+        let rightElev = leftElev;
+        for (let ri = i + 1; ri < pts.length; ri++) {
+          const rt = state.tiles[tileIndex(pts[ri].x, pts[ri].y, state.mapSize)];
+          if (rt.terrain !== 'WATER') {
+            rightElev = rt.elevation;
+            break;
+          }
+        }
         t.bridge = mode;
         t.bridgeAxis = axis;
+        t.bridgeType = 'STEEL';
+        t.bridgeElevation = Math.max(1, leftElev, rightElev);
         t.road = mode === 'ROAD';
         t.rail = mode === 'RAIL';
         if (!t.ownerId) t.ownerId = ownerId;
-        cost += mode === 'RAIL' ? 18_000 : 12_000;
+        cost +=
+          mode === 'RAIL'
+            ? BRIDGE_CATALOG.STEEL.railCostPerTile
+            : BRIDGE_CATALOG.STEEL.roadCostPerTile;
       }
       continue;
     }

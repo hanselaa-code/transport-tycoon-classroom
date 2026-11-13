@@ -1,9 +1,10 @@
 import * as THREE from 'three';
-import type { GameState, Station, Tile } from '../types/game';
+import type { BridgeType, GameState, Station, Tile } from '../types/game';
 import {
-  BRIDGE_DECK_Y,
+  ELEV_STEP,
   TERRAIN_BASE_Y,
   WATER_SURFACE_Y,
+  getBridgeDeckY,
   getCornerHeight,
   getSurfaceHeightAt,
   getTileAt,
@@ -31,9 +32,9 @@ const MAX_RAIL_RAILS = 70000;
 const MAX_RAIL_CLIPS = 90000;
 const MAX_BUFFERS = 4096;
 
-const MAX_BRIDGE_PIERS = 8192;
-const MAX_BRIDGE_DECKS = 12288;
-const MAX_BRIDGE_TRUSS = 32768;
+const MAX_BRIDGE_PIERS = 12288;
+const MAX_BRIDGE_DECKS = 24576;
+const MAX_BRIDGE_TRUSS = 49152;
 
 const SUN_DIR = new THREE.Vector3(-0.62, 0.78, 0.44).normalize();
 
@@ -387,11 +388,11 @@ export class TerrainInstancer {
     this.railWarningBeams.castShadow = true;
     this.railWarningBeams.frustumCulled = false;
 
-    // 8. 3D OpenTTD Road & Rail Bridges (Submerged Piers, Concrete Decks/Ramps, Red-Oxide Steel Trusses & Parapets)
+    // 8. 3D Road & Rail Bridges (3 Tiers: WOOD Timber Trestle, STEEL Warren Truss, MODERN Cable-Stayed Pylon)
     const pierGeo = new THREE.CylinderGeometry(0.068, 0.085, 1.0, 8);
     const pierMat = new THREE.MeshLambertMaterial({
       map: this.textures.urbanSidewalk,
-      color: '#cbd5e1',
+      color: '#ffffff',
     });
     this.bridgePiers = new THREE.InstancedMesh(pierGeo, pierMat, MAX_BRIDGE_PIERS);
     this.bridgePiers.castShadow = true;
@@ -400,7 +401,7 @@ export class TerrainInstancer {
 
     const bridgeConcMat = new THREE.MeshLambertMaterial({
       map: this.textures.urbanSidewalk,
-      color: '#d6d3d1',
+      color: '#ffffff',
     });
     this.bridgeConcrete = new THREE.InstancedMesh(unitBox, bridgeConcMat, MAX_BRIDGE_DECKS);
     this.bridgeConcrete.castShadow = true;
@@ -466,6 +467,10 @@ export class TerrainInstancer {
       if (t.bridge === 'ROAD') code |= 1 << 16;
       else if (t.bridge === 'RAIL') code |= 1 << 17;
       if (t.bridgeAxis === 'Y') code |= 1 << 18;
+      if (t.bridgeType === 'WOOD') code |= 1 << 19;
+      else if (t.bridgeType === 'STEEL') code |= 2 << 19;
+      else if (t.bridgeType === 'MODERN') code |= 3 << 19;
+      if (t.bridgeElevation) code |= (t.bridgeElevation & 7) << 21;
 
       hash ^= code;
       hash = Math.imul(hash, 16777619) >>> 0;
@@ -997,6 +1002,22 @@ export class TerrainInstancer {
       const hE = 0.5 * (cNE + cSE);
       const hW = 0.5 * (cNW + cSW);
 
+      const pushBridgePierInstance = (mat: THREE.Matrix4, hex: string): void => {
+        if (bridgePierIdx >= MAX_BRIDGE_PIERS) return;
+        this.bridgePiers.setMatrixAt(bridgePierIdx, mat);
+        this.color.set(hex);
+        this.bridgePiers.setColorAt(bridgePierIdx, this.color);
+        bridgePierIdx++;
+      };
+
+      const pushBridgeConcInstance = (mat: THREE.Matrix4, hex: string): void => {
+        if (bridgeConcIdx >= MAX_BRIDGE_DECKS) return;
+        this.bridgeConcrete.setMatrixAt(bridgeConcIdx, mat);
+        this.color.set(hex);
+        this.bridgeConcrete.setColorAt(bridgeConcIdx, this.color);
+        bridgeConcIdx++;
+      };
+
       const pushBridgeTrussInstance = (mat: THREE.Matrix4, hex: string): void => {
         if (bridgeTrussIdx >= MAX_BRIDGE_TRUSS) return;
         this.bridgeTruss.setMatrixAt(bridgeTrussIdx, mat);
@@ -1005,7 +1026,7 @@ export class TerrainInstancer {
         bridgeTrussIdx++;
       };
 
-      // 5A. 3D OpenTTD Elevated Water Bridges (`tile.bridge === 'ROAD' | 'RAIL'`)
+      // 5A. 3D Road & Rail Bridges (`WOOD` Timber Trestle, `STEEL` Lattice Truss, `MODERN` Cable-Stayed Pylon)
       if (tile.bridge === 'ROAD' || tile.bridge === 'RAIL') {
         const axis = getBridgeAxis(tile);
         const isX = axis === 'X';
@@ -1018,276 +1039,828 @@ export class TerrainInstancer {
         const latX = isX ? 0 : 1;
         const latZ = isX ? 1 : 0;
 
-        // 1) Twin Submerged Concrete Water Piers + Pier Cap Beam + Waterline Foam Collar
+        const deckY = getBridgeDeckY(state, tile);
+        const bType: BridgeType = tile.bridgeType ?? 'STEEL';
+        const gauge = 0.145;
+
+        // Measure contiguous bridge span (spanIdx in [0 .. spanLen - 1])
+        let beforeCount = 0;
+        for (let step = 1; step <= mapSize; step++) {
+          const prev = getTileAt(state, x - fwdX * step, y - fwdZ * step);
+          if (
+            prev &&
+            prev.bridge === tile.bridge &&
+            getBridgeAxis(prev) === axis &&
+            (prev.bridgeType ?? 'STEEL') === bType
+          ) {
+            beforeCount++;
+          } else {
+            break;
+          }
+        }
+        let afterCount = 0;
+        for (let step = 1; step <= mapSize; step++) {
+          const nxt = getTileAt(state, x + fwdX * step, y + fwdZ * step);
+          if (
+            nxt &&
+            nxt.bridge === tile.bridge &&
+            getBridgeAxis(nxt) === axis &&
+            (nxt.bridgeType ?? 'STEEL') === bType
+          ) {
+            afterCount++;
+          } else {
+            break;
+          }
+        }
+        const spanIdx = beforeCount;
+        const spanLen = beforeCount + 1 + afterCount;
+        const isSpanEnd = afterCount === 0;
+
         const pierBotY = TERRAIN_BASE_Y * 0.45;
-        const pierTopY = BRIDGE_DECK_Y - 0.046;
-        const pierH = pierTopY - pierBotY;
-        const pierMidY = 0.5 * (pierBotY + pierTopY);
 
-        for (const latOff of [-0.205, 0.205]) {
-          if (bridgePierIdx >= MAX_BRIDGE_PIERS) break;
-          this.quat.identity();
-          this.pos.set(x + latX * latOff, pierMidY, y + latZ * latOff);
-          this.scale.set(1, pierH, 1);
-          this.mat4.compose(this.pos, this.quat, this.scale);
-          this.bridgePiers.setMatrixAt(bridgePierIdx++, this.mat4);
-        }
+        if (bType === 'WOOD') {
+          // =========================================================================
+          // TIER 1: `WOOD` (*Trebru*) — Rustic Timber Trestle Pilings, Plank Deck & Wood Rails
+          // =========================================================================
+          const pierTopY = deckY - 0.036;
+          const pierH = Math.max(0.18, pierTopY - pierBotY);
+          const pierMidY = 0.5 * (pierBotY + pierTopY);
 
-        if (bridgeConcIdx < MAX_BRIDGE_DECKS) {
-          this.bridgeConcrete.setMatrixAt(
-            bridgeConcIdx++,
-            this.composeSurfaceAlignedBox(
-              x, BRIDGE_DECK_Y, y,
-              fwdX, 0, fwdZ,
-              rgtX, 0, rgtZ,
-              0.62, 0.052, 0.17, -0.042
-            )
-          );
-        }
+          // 4 slender creosote-brown wooden trestle pilings + 2 transverse timber bent caps + X-bracing
+          for (const sBent of [-0.27, 0.27]) {
+            const bx = x + fwdX * sBent;
+            const bz = y + fwdZ * sBent;
 
-        if (isWater && foamIdx < MAX_FOAM_EDGES) {
-          this.pos.set(x, WATER_SURFACE_Y + 0.005, y);
-          this.euler.set(0, isX ? Math.PI / 2 : 0, 0);
-          this.quat.setFromEuler(this.euler);
-          this.scale.set(0.68, 1, 1.35);
-          this.mat4.compose(this.pos, this.quat, this.scale);
-          this.shoreFoamLayer.setMatrixAt(foamIdx++, this.mat4);
-        }
-
-        if (tile.bridge === 'ROAD') {
-          // 2) Pre-stressed Concrete Box-Girder Deck + Raised Side Curbs
-          if (bridgeConcIdx < MAX_BRIDGE_DECKS) {
-            this.bridgeConcrete.setMatrixAt(
-              bridgeConcIdx++,
-              this.composeSurfaceAlignedBox(
-                x, BRIDGE_DECK_Y, y,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.62, 0.072, 1.025, 0.022
-              )
-            );
-          }
-
-          for (const curbOff of [-0.275, 0.275]) {
-            if (bridgeConcIdx >= MAX_BRIDGE_DECKS) break;
-            this.bridgeConcrete.setMatrixAt(
-              bridgeConcIdx++,
-              this.composeSurfaceAlignedBox(
-                x + latX * curbOff, BRIDGE_DECK_Y, y + latZ * curbOff,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.068, 0.046, 1.025, 0.054
-              )
-            );
-          }
-
-          // 3) Textured Dark Asphalt Deck + White Highway Dashes
-          if (roadSegIdx < MAX_ROAD_SEGMENTS) {
-            this.roadAsphalt.setMatrixAt(
-              roadSegIdx++,
-              this.composeSurfaceAlignedBox(
-                x, BRIDGE_DECK_Y, y,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.46, 0.032, 1.025, 0.029
-              )
-            );
-          }
-
-          for (const sDash of [-0.33, 0.0, 0.33]) {
-            if (roadDashIdx >= MAX_ROAD_DASHES) break;
-            this.roadDashes.setMatrixAt(
-              roadDashIdx++,
-              this.composeSurfaceAlignedBox(
-                x + fwdX * sDash, BRIDGE_DECK_Y, y + fwdZ * sDash,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.034, 0.008, 0.125, 0.035
-              )
-            );
-          }
-
-          // 4) Twin Painted Steel Safety Guardrails / Parapets
-          for (const sideOff of [-0.285, 0.285]) {
-            const gx = x + latX * sideOff;
-            const gz = y + latZ * sideOff;
-
-            // Crimson top rail + galvanized silver mid rail
-            pushBridgeTrussInstance(
-              this.composeSurfaceAlignedBox(
-                gx, BRIDGE_DECK_Y, gz,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.028, 0.024, 1.025, 0.132
-              ),
-              '#dc2626'
-            );
-            pushBridgeTrussInstance(
-              this.composeSurfaceAlignedBox(
-                gx, BRIDGE_DECK_Y, gz,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.022, 0.018, 1.025, 0.092
-              ),
-              '#e2e8f0'
-            );
-
-            // Stanchion posts
-            for (const postS of [-0.38, -0.13, 0.13, 0.38]) {
+            for (const latOff of [-0.195, 0.195]) {
               this.quat.identity();
-              this.pos.set(gx + fwdX * postS, BRIDGE_DECK_Y + 0.088, gz + fwdZ * postS);
-              this.scale.set(0.026, 0.085, 0.026);
+              this.pos.set(bx + latX * latOff, pierMidY, bz + latZ * latOff);
+              this.scale.set(0.54, pierH, 0.54);
               this.mat4.compose(this.pos, this.quat, this.scale);
-              pushBridgeTrussInstance(this.mat4, '#cbd5e1');
+              pushBridgePierInstance(this.mat4, '#5c3a21');
+            }
+
+            // Transverse timber cap beam atop each 2-pile bent
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                bx, deckY, bz,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.56, 0.044, 0.088, -0.020
+              ),
+              '#6d4124'
+            );
+
+            // Diagonal timber X-brace struts between left & right pilings above waterline
+            const braceBotY = Math.min(deckY - 0.12, WATER_SURFACE_Y + 0.015);
+            const braceTopY = deckY - 0.052;
+            const braceRise = braceTopY - braceBotY;
+            if (braceRise > 0.05) {
+              const braceMidY = 0.5 * (braceBotY + braceTopY);
+              const braceLen = Math.hypot(0.39, braceRise);
+              for (const sign of [-1, 1]) {
+                pushBridgeTrussInstance(
+                  this.composeSurfaceAlignedBox(
+                    bx, braceMidY, bz,
+                    latX * 0.39 * sign, braceRise, latZ * 0.39 * sign,
+                    fwdX, 0, fwdZ,
+                    0.022, 0.022, braceLen, 0.011
+                  ),
+                  '#7c4a24'
+                );
+              }
             }
           }
-        } else {
-          // RAIL BRIDGE: Iconic OpenTTD Red-Oxide Warren Steel Lattice Through-Truss Bridge!
-          const gauge = 0.145;
 
-          // 1) Heavy Dark-Slate Under-Deck Plate Girder
-          pushBridgeTrussInstance(
-            this.composeSurfaceAlignedBox(
-              x, BRIDGE_DECK_Y, y,
-              fwdX, 0, fwdZ,
-              rgtX, 0, rgtZ,
-              0.64, 0.068, 1.025, 0.024
-            ),
-            '#334155'
-          );
+          // Longitudinal timber stringer beams under the wooden deck
+          for (const strOff of [-0.17, 0.17]) {
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x + latX * strOff, deckY, y + latZ * strOff,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.058, 0.048, 1.025, 0.002
+              ),
+              '#5c3a21'
+            );
+          }
 
-          // 2) Closely-Spaced Open-Deck Timber Bridge Ties + Iron Clips + Twin Steel Rails
-          for (let sIdx = 0; sIdx < 8; sIdx++) {
-            const sPos = -0.4375 + sIdx * 0.125;
-            const sx = x + fwdX * sPos;
-            const sz = y + fwdZ * sPos;
+          if (isWater && foamIdx < MAX_FOAM_EDGES) {
+            this.pos.set(x, WATER_SURFACE_Y + 0.005, y);
+            this.euler.set(0, isX ? Math.PI / 2 : 0, 0);
+            this.quat.setFromEuler(this.euler);
+            this.scale.set(0.62, 1, 1.25);
+            this.mat4.compose(this.pos, this.quat, this.scale);
+            this.shoreFoamLayer.setMatrixAt(foamIdx++, this.mat4);
+          }
 
-            if (sleeperIdx < MAX_RAIL_SLEEPERS) {
-              this.railSleepers.setMatrixAt(
-                sleeperIdx++,
+          if (tile.bridge === 'ROAD') {
+            // 6 transverse rough-sawn warm wooden deck planks + longitudinal wheel runner boards
+            for (let pIdx = 0; pIdx < 6; pIdx++) {
+              const pOff = -0.415 + pIdx * 0.166;
+              pushBridgeConcInstance(
                 this.composeSurfaceAlignedBox(
-                  sx, BRIDGE_DECK_Y, sz,
+                  x + fwdX * pOff, deckY, y + fwdZ * pOff,
                   fwdX, 0, fwdZ,
                   rgtX, 0, rgtZ,
-                  0.50, 0.024, 0.068, 0.041
-                )
+                  0.56, 0.032, 0.152, 0.029
+                ),
+                pIdx % 2 === 0 ? '#9c663b' : '#8b5730'
               );
+            }
+            for (const trackOff of [-0.125, 0.125]) {
+              pushBridgeConcInstance(
+                this.composeSurfaceAlignedBox(
+                  x + latX * trackOff, deckY, y + latZ * trackOff,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.095, 0.008, 1.022, 0.034
+                ),
+                '#78492a'
+              );
+            }
+          } else {
+            // Wooden trestle sub-deck + 8 timber sleepers + iron clips + twin steel rails
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.56, 0.034, 1.025, 0.024
+              ),
+              '#8b5730'
+            );
+
+            for (let sIdx = 0; sIdx < 8; sIdx++) {
+              const sPos = -0.4375 + sIdx * 0.125;
+              const sx = x + fwdX * sPos;
+              const sz = y + fwdZ * sPos;
+              if (sleeperIdx < MAX_RAIL_SLEEPERS) {
+                this.railSleepers.setMatrixAt(
+                  sleeperIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx, deckY, sz,
+                    fwdX, 0, fwdZ,
+                    rgtX, 0, rgtZ,
+                    0.50, 0.024, 0.068, 0.041
+                  )
+                );
+              }
+              for (const side of [-gauge, gauge]) {
+                if (clipIdx >= MAX_RAIL_CLIPS) break;
+                this.railClips.setMatrixAt(
+                  clipIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx + latX * side, deckY, sz + latZ * side,
+                    fwdX, 0, fwdZ,
+                    rgtX, 0, rgtZ,
+                    0.068, 0.012, 0.068, 0.046
+                  )
+                );
+              }
             }
 
             for (const side of [-gauge, gauge]) {
-              if (clipIdx >= MAX_RAIL_CLIPS) break;
-              this.railClips.setMatrixAt(
-                clipIdx++,
+              if (railSteelIdx >= MAX_RAIL_RAILS) break;
+              this.railSteel.setMatrixAt(
+                railSteelIdx++,
                 this.composeSurfaceAlignedBox(
-                  sx + latX * side, BRIDGE_DECK_Y, sz + latZ * side,
+                  x + latX * side, deckY, y + latZ * side,
                   fwdX, 0, fwdZ,
                   rgtX, 0, rgtZ,
-                  0.068, 0.012, 0.068, 0.046
+                  0.038, 0.026, 1.03, 0.058
                 )
               );
             }
           }
 
-          for (const side of [-gauge, gauge]) {
-            if (railSteelIdx >= MAX_RAIL_RAILS) break;
-            this.railSteel.setMatrixAt(
-              railSteelIdx++,
+          // Low rustic wooden post-and-rail guardrails along both deck edges
+          for (const sideOff of [-0.265, 0.265]) {
+            const gx = x + latX * sideOff;
+            const gz = y + latZ * sideOff;
+
+            pushBridgeTrussInstance(
               this.composeSurfaceAlignedBox(
-                x + latX * side, BRIDGE_DECK_Y, y + latZ * side,
+                gx, deckY, gz,
                 fwdX, 0, fwdZ,
                 rgtX, 0, rgtZ,
-                0.038, 0.026, 1.03, 0.058
-              )
+                0.028, 0.022, 1.025, 0.126
+              ),
+              '#a66a38'
+            );
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                gx, deckY, gz,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.024, 0.018, 1.025, 0.082
+              ),
+              '#8c562c'
+            );
+
+            for (const postS of [-0.38, -0.13, 0.13, 0.38]) {
+              this.quat.identity();
+              this.pos.set(gx + fwdX * postS, deckY + 0.078, gz + fwdZ * postS);
+              this.scale.set(0.032, 0.105, 0.032);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              pushBridgeTrussInstance(this.mat4, '#6b3f21');
+            }
+          }
+        } else if (bType === 'MODERN') {
+          // =========================================================================
+          // TIER 3: `MODERN` (*Moderne skråstagbru*) — Twin White H-Frame Pylon Towers & Fan Stay Cables
+          // =========================================================================
+          const towerIndices: number[] = [];
+          if (spanLen <= 3) {
+            towerIndices.push(Math.floor((spanLen - 1) / 2));
+          } else if (spanLen <= 7) {
+            towerIndices.push(1, spanLen - 2);
+          } else {
+            for (let ti = 1; ti < spanLen - 1; ti += 4) {
+              towerIndices.push(ti);
+            }
+          }
+
+          let nearestTowerIdx = towerIndices[0] ?? 0;
+          let bestDist = Math.abs(spanIdx - nearestTowerIdx);
+          for (let k = 1; k < towerIndices.length; k++) {
+            const d = Math.abs(spanIdx - towerIndices[k]);
+            if (d < bestDist) {
+              bestDist = d;
+              nearestTowerIdx = towerIndices[k];
+            }
+          }
+          const deltaTiles = spanIdx - nearestTowerIdx;
+          const isPylonTile = deltaTiles === 0;
+
+          const pierTopY = deckY - 0.042;
+          const pierH = Math.max(0.20, pierTopY - pierBotY);
+          const pierMidY = 0.5 * (pierBotY + pierTopY);
+
+          if (isPylonTile) {
+            // Heavy sculpted white concrete caisson piers supporting the twin pylon tower legs
+            for (const latOff of [-0.335, 0.335]) {
+              this.quat.identity();
+              this.pos.set(x + latX * latOff, pierMidY, y + latZ * latOff);
+              this.scale.set(1.26, pierH, 1.26);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              pushBridgePierInstance(this.mat4, '#f1f5f9');
+            }
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.80, 0.068, 0.24, -0.026
+              ),
+              '#f8fafc'
+            );
+            if (isWater && foamIdx < MAX_FOAM_EDGES) {
+              this.pos.set(x, WATER_SURFACE_Y + 0.005, y);
+              this.euler.set(0, isX ? Math.PI / 2 : 0, 0);
+              this.quat.setFromEuler(this.euler);
+              this.scale.set(0.86, 1, 1.55);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              this.shoreFoamLayer.setMatrixAt(foamIdx++, this.mat4);
+            }
+          } else if (Math.abs(deltaTiles) >= 3 && Math.abs(deltaTiles) % 2 === 1) {
+            // Slender auxiliary white concrete twin V-piers on ultra-long outer spans
+            for (const latOff of [-0.185, 0.185]) {
+              this.quat.identity();
+              this.pos.set(x + latX * latOff, pierMidY, y + latZ * latOff);
+              this.scale.set(0.76, pierH, 0.76);
+              this.mat4.compose(this.pos, this.quat, this.scale);
+              pushBridgePierInstance(this.mat4, '#e2e8f0');
+            }
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.56, 0.048, 0.15, -0.036
+              ),
+              '#f1f5f9'
             );
           }
 
-          // 3) Twin Red-Oxide Steel Lattice Side Trusses (Bottom/Top Chords + Verticals + 45° Warren Diagonals)
-          const trussH = 0.32;
-          const diagLen = Math.hypot(0.5, trussH);
-          const nextAlong = getTileAt(state, x + fwdX, y + fwdZ);
-          const isSpanEnd = !nextAlong || nextAlong.bridge !== 'RAIL';
+          // Sleek aerodynamic pearl-white box-girder deck + tapered white spine + cyan fascia trim
+          pushBridgeConcInstance(
+            this.composeSurfaceAlignedBox(
+              x, deckY, y,
+              fwdX, 0, fwdZ,
+              rgtX, 0, rgtZ,
+              0.68, 0.062, 1.028, 0.022
+            ),
+            '#f8fafc'
+          );
+          pushBridgeConcInstance(
+            this.composeSurfaceAlignedBox(
+              x, deckY, y,
+              fwdX, 0, fwdZ,
+              rgtX, 0, rgtZ,
+              0.38, 0.034, 1.028, -0.038
+            ),
+            '#e2e8f0'
+          );
 
-          for (const sideOff of [-0.295, 0.295]) {
-            const tx = x + latX * sideOff;
-            const tz = y + latZ * sideOff;
-
-            // Bottom chord
+          for (const sideSign of [-1, 1]) {
+            // Sky-cyan architectural fascia accent strip along outer deck edge
             pushBridgeTrussInstance(
               this.composeSurfaceAlignedBox(
-                tx, BRIDGE_DECK_Y, tz,
+                x + latX * (sideSign * 0.342), deckY, y + latZ * (sideSign * 0.342),
                 fwdX, 0, fwdZ,
                 rgtX, 0, rgtZ,
-                0.038, 0.036, 1.025, 0.046
+                0.018, 0.022, 1.028, 0.018
+              ),
+              '#38bdf8'
+            );
+
+            // Sleek white/silver aerodynamic edge wind barrier
+            const bxEdge = x + latX * (sideSign * 0.312);
+            const bzEdge = y + latZ * (sideSign * 0.312);
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                bxEdge, deckY, bzEdge,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.046, 0.044, 1.028, 0.062
+              ),
+              '#f1f5f9'
+            );
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                bxEdge, deckY, bzEdge,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.022, 0.018, 1.028, 0.106
+              ),
+              '#cbd5e1'
+            );
+          }
+
+          if (tile.bridge === 'ROAD') {
+            // High-speed motorway dark asphalt deck + crisp white highway center dashes
+            if (roadSegIdx < MAX_ROAD_SEGMENTS) {
+              this.roadAsphalt.setMatrixAt(
+                roadSegIdx++,
+                this.composeSurfaceAlignedBox(
+                  x, deckY, y,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.48, 0.032, 1.028, 0.029
+                )
+              );
+            }
+            for (const sDash of [-0.33, 0.0, 0.33]) {
+              if (roadDashIdx >= MAX_ROAD_DASHES) break;
+              this.roadDashes.setMatrixAt(
+                roadDashIdx++,
+                this.composeSurfaceAlignedBox(
+                  x + fwdX * sDash, deckY, y + fwdZ * sDash,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.034, 0.008, 0.135, 0.035
+                )
+              );
+            }
+          } else {
+            // High-speed slab-track rail bed: concrete monoblock sleepers + clips + welded steel rails
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.50, 0.018, 1.028, 0.029
+              ),
+              '#cbd5e1'
+            );
+            for (let sIdx = 0; sIdx < 8; sIdx++) {
+              const sPos = -0.4375 + sIdx * 0.125;
+              const sx = x + fwdX * sPos;
+              const sz = y + fwdZ * sPos;
+              pushBridgeConcInstance(
+                this.composeSurfaceAlignedBox(
+                  sx, deckY, sz,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.48, 0.022, 0.066, 0.041
+                ),
+                '#e2e8f0'
+              );
+              for (const side of [-gauge, gauge]) {
+                if (clipIdx >= MAX_RAIL_CLIPS) break;
+                this.railClips.setMatrixAt(
+                  clipIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx + latX * side, deckY, sz + latZ * side,
+                    fwdX, 0, fwdZ,
+                    rgtX, 0, rgtZ,
+                    0.068, 0.012, 0.068, 0.046
+                  )
+                );
+              }
+            }
+            for (const side of [-gauge, gauge]) {
+              if (railSteelIdx >= MAX_RAIL_RAILS) break;
+              this.railSteel.setMatrixAt(
+                railSteelIdx++,
+                this.composeSurfaceAlignedBox(
+                  x + latX * side, deckY, y + latZ * side,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.038, 0.026, 1.03, 0.058
+                )
+              );
+            }
+          }
+
+          // Tall Twin White H-Frame Cable-Stayed Pylon Towers on designated tower tiles
+          const towerH = 0.82;
+          if (isPylonTile) {
+            for (const sideSign of [-1, 1]) {
+              const pxLeg = x + latX * (sideSign * 0.335);
+              const pzLeg = y + latZ * (sideSign * 0.335);
+
+              // Main sculpted white concrete vertical pylon leg
+              pushBridgeConcInstance(
+                this.composeSurfaceAlignedBox(
+                  pxLeg, deckY, pzLeg,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.068, towerH + 0.08, 0.088, towerH
+                ),
+                '#f8fafc'
+              );
+
+              // Tapered silver-white upper mast spire + cyan finial cap
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  pxLeg, deckY, pzLeg,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.042, 0.14, 0.052, towerH + 0.14
+                ),
+                '#e2e8f0'
+              );
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  pxLeg, deckY, pzLeg,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.026, 0.036, 0.026, towerH + 0.176
+                ),
+                '#38bdf8'
+              );
+            }
+
+            // Mid & upper horizontal white H-frame portal cross-beams above vehicle clearance
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.738, 0.046, 0.072, 0.48
+              ),
+              '#f1f5f9'
+            );
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.738, 0.052, 0.078, 0.74
+              ),
+              '#f8fafc'
+            );
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.744, 0.016, 0.082, 0.748
+              ),
+              '#38bdf8'
+            );
+          }
+
+          // 3D Diagonal Silver-White Fan Stay Cables radiating from nearest pylon saddle to deck edges
+          if (Math.abs(deltaTiles) <= 4) {
+            const towerX = x - fwdX * deltaTiles;
+            const towerZ = y - fwdZ * deltaTiles;
+            const sAnchors = isPylonTile ? [-0.42, 0.42] : [-0.23, 0.23];
+
+            for (const sAnchor of sAnchors) {
+              const distAlong = Math.abs(deltaTiles + sAnchor);
+              const saddleY = deckY + Math.min(0.77, 0.67 + distAlong * 0.026);
+              const anchorY = deckY + 0.052;
+
+              for (const sideSign of [-1, 1]) {
+                const p0x = towerX + latX * (sideSign * 0.335);
+                const p0y = saddleY;
+                const p0z = towerZ + latZ * (sideSign * 0.335);
+
+                const p1x = x + fwdX * sAnchor + latX * (sideSign * 0.312);
+                const p1y = anchorY;
+                const p1z = y + fwdZ * sAnchor + latZ * (sideSign * 0.312);
+
+                const dxC = p1x - p0x;
+                const dyC = p1y - p0y;
+                const dzC = p1z - p0z;
+                const cableLen = Math.hypot(dxC, dyC, dzC);
+
+                pushBridgeTrussInstance(
+                  this.composeSurfaceAlignedBox(
+                    0.5 * (p0x + p1x),
+                    0.5 * (p0y + p1y),
+                    0.5 * (p0z + p1z),
+                    dxC, dyC, dzC,
+                    latX, 0, latZ,
+                    0.015, 0.015, cableLen, 0.0075
+                  ),
+                  '#e2e8f0'
+                );
+              }
+            }
+          }
+        } else {
+          // =========================================================================
+          // TIER 2: `STEEL` (*Stålfagverksbru*) — Cylindrical Concrete Piers & Riveted Steel Lattice Trusses
+          // =========================================================================
+          const pierTopY = deckY - 0.046;
+          const pierH = Math.max(0.18, pierTopY - pierBotY);
+          const pierMidY = 0.5 * (pierBotY + pierTopY);
+
+          for (const latOff of [-0.205, 0.205]) {
+            this.quat.identity();
+            this.pos.set(x + latX * latOff, pierMidY, y + latZ * latOff);
+            this.scale.set(1, pierH, 1);
+            this.mat4.compose(this.pos, this.quat, this.scale);
+            pushBridgePierInstance(this.mat4, '#cbd5e1');
+          }
+
+          pushBridgeConcInstance(
+            this.composeSurfaceAlignedBox(
+              x, deckY, y,
+              fwdX, 0, fwdZ,
+              rgtX, 0, rgtZ,
+              0.62, 0.052, 0.17, -0.042
+            ),
+            '#cbd5e1'
+          );
+
+          if (isWater && foamIdx < MAX_FOAM_EDGES) {
+            this.pos.set(x, WATER_SURFACE_Y + 0.005, y);
+            this.euler.set(0, isX ? Math.PI / 2 : 0, 0);
+            this.quat.setFromEuler(this.euler);
+            this.scale.set(0.68, 1, 1.35);
+            this.mat4.compose(this.pos, this.quat, this.scale);
+            this.shoreFoamLayer.setMatrixAt(foamIdx++, this.mat4);
+          }
+
+          if (tile.bridge === 'ROAD') {
+            // Reinforced concrete box-girder deck + curbs + asphalt + riveted industrial steel pony-truss side girders
+            pushBridgeConcInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.62, 0.072, 1.025, 0.022
+              ),
+              '#cbd5e1'
+            );
+
+            for (const curbOff of [-0.275, 0.275]) {
+              pushBridgeConcInstance(
+                this.composeSurfaceAlignedBox(
+                  x + latX * curbOff, deckY, y + latZ * curbOff,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.068, 0.046, 1.025, 0.054
+                ),
+                '#cbd5e1'
+              );
+            }
+
+            if (roadSegIdx < MAX_ROAD_SEGMENTS) {
+              this.roadAsphalt.setMatrixAt(
+                roadSegIdx++,
+                this.composeSurfaceAlignedBox(
+                  x, deckY, y,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.46, 0.032, 1.025, 0.029
+                )
+              );
+            }
+
+            for (const sDash of [-0.33, 0.0, 0.33]) {
+              if (roadDashIdx >= MAX_ROAD_DASHES) break;
+              this.roadDashes.setMatrixAt(
+                roadDashIdx++,
+                this.composeSurfaceAlignedBox(
+                  x + fwdX * sDash, deckY, y + fwdZ * sDash,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.034, 0.008, 0.125, 0.035
+                )
+              );
+            }
+
+            // Riveted industrial steel Warren pony-truss girders along both road edges
+            const ponyH = 0.155;
+            const ponyDiagLen = Math.hypot(0.5, ponyH);
+            for (const sideOff of [-0.288, 0.288]) {
+              const gx = x + latX * sideOff;
+              const gz = y + latZ * sideOff;
+
+              // Bottom steel chord + crimson-red top truss chord
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  gx, deckY, gz,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.034, 0.030, 1.025, 0.048
+                ),
+                '#334155'
+              );
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  gx, deckY, gz,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.036, 0.032, 1.025, 0.048 + ponyH
+                ),
+                '#dc2626'
+              );
+
+              // Vertical steel H-posts + Warren lattice diagonals
+              const vPosts = isSpanEnd ? [-0.5, 0.0, 0.5] : [-0.5, 0.0];
+              for (const vp of vPosts) {
+                this.quat.identity();
+                this.pos.set(gx + fwdX * vp, deckY + 0.038 + ponyH * 0.5, gz + fwdZ * vp);
+                this.scale.set(0.030, ponyH, 0.030);
+                this.mat4.compose(this.pos, this.quat, this.scale);
+                pushBridgeTrussInstance(this.mat4, '#475569');
+              }
+
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  gx - fwdX * 0.25,
+                  deckY + 0.038 + ponyH * 0.5,
+                  gz - fwdZ * 0.25,
+                  fwdX * 0.5, ponyH, fwdZ * 0.5,
+                  rgtX, 0, rgtZ,
+                  0.024, 0.024, ponyDiagLen, 0.012
+                ),
+                '#64748b'
+              );
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  gx + fwdX * 0.25,
+                  deckY + 0.038 + ponyH * 0.5,
+                  gz + fwdZ * 0.25,
+                  fwdX * 0.5, -ponyH, fwdZ * 0.5,
+                  rgtX, 0, rgtZ,
+                  0.024, 0.024, ponyDiagLen, 0.012
+                ),
+                '#64748b'
+              );
+            }
+          } else {
+            // RAIL STEEL BRIDGE: Iconic OpenTTD Red-Oxide Warren Steel Lattice Through-Truss Bridge!
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.64, 0.068, 1.025, 0.024
+              ),
+              '#334155'
+            );
+
+            for (let sIdx = 0; sIdx < 8; sIdx++) {
+              const sPos = -0.4375 + sIdx * 0.125;
+              const sx = x + fwdX * sPos;
+              const sz = y + fwdZ * sPos;
+
+              if (sleeperIdx < MAX_RAIL_SLEEPERS) {
+                this.railSleepers.setMatrixAt(
+                  sleeperIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx, deckY, sz,
+                    fwdX, 0, fwdZ,
+                    rgtX, 0, rgtZ,
+                    0.50, 0.024, 0.068, 0.041
+                  )
+                );
+              }
+
+              for (const side of [-gauge, gauge]) {
+                if (clipIdx >= MAX_RAIL_CLIPS) break;
+                this.railClips.setMatrixAt(
+                  clipIdx++,
+                  this.composeSurfaceAlignedBox(
+                    sx + latX * side, deckY, sz + latZ * side,
+                    fwdX, 0, fwdZ,
+                    rgtX, 0, rgtZ,
+                    0.068, 0.012, 0.068, 0.046
+                  )
+                );
+              }
+            }
+
+            for (const side of [-gauge, gauge]) {
+              if (railSteelIdx >= MAX_RAIL_RAILS) break;
+              this.railSteel.setMatrixAt(
+                railSteelIdx++,
+                this.composeSurfaceAlignedBox(
+                  x + latX * side, deckY, y + latZ * side,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.038, 0.026, 1.03, 0.058
+                )
+              );
+            }
+
+            const trussH = 0.32;
+            const diagLen = Math.hypot(0.5, trussH);
+
+            for (const sideOff of [-0.295, 0.295]) {
+              const tx = x + latX * sideOff;
+              const tz = y + latZ * sideOff;
+
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  tx, deckY, tz,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.038, 0.036, 1.025, 0.046
+                ),
+                '#9a3412'
+              );
+
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  tx, deckY, tz,
+                  fwdX, 0, fwdZ,
+                  rgtX, 0, rgtZ,
+                  0.042, 0.040, 1.025, 0.046 + trussH
+                ),
+                '#b9381e'
+              );
+
+              const vPosts = isSpanEnd ? [-0.5, 0.0, 0.5] : [-0.5, 0.0];
+              for (const vp of vPosts) {
+                this.quat.identity();
+                this.pos.set(
+                  tx + fwdX * vp,
+                  deckY + 0.035 + trussH * 0.5,
+                  tz + fwdZ * vp
+                );
+                this.scale.set(0.034, trussH, 0.034);
+                this.mat4.compose(this.pos, this.quat, this.scale);
+                pushBridgeTrussInstance(this.mat4, '#a8321e');
+              }
+
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  tx - fwdX * 0.25,
+                  deckY + 0.035 + trussH * 0.5,
+                  tz - fwdZ * 0.25,
+                  fwdX * 0.5, trussH, fwdZ * 0.5,
+                  rgtX, 0, rgtZ,
+                  0.028, 0.028, diagLen, 0.014
+                ),
+                '#c2410c'
+              );
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  tx + fwdX * 0.25,
+                  deckY + 0.035 + trussH * 0.5,
+                  tz + fwdZ * 0.25,
+                  fwdX * 0.5, -trussH, fwdZ * 0.5,
+                  rgtX, 0, rgtZ,
+                  0.028, 0.028, diagLen, 0.014
+                ),
+                '#c2410c'
+              );
+            }
+
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                x, deckY, y,
+                fwdX, 0, fwdZ,
+                rgtX, 0, rgtZ,
+                0.63, 0.032, 0.048, 0.052 + trussH
               ),
               '#9a3412'
             );
-
-            // Elevated top chord
-            pushBridgeTrussInstance(
-              this.composeSurfaceAlignedBox(
-                tx, BRIDGE_DECK_Y, tz,
-                fwdX, 0, fwdZ,
-                rgtX, 0, rgtZ,
-                0.042, 0.040, 1.025, 0.046 + trussH
-              ),
-              '#b9381e'
-            );
-
-            // Vertical H-beam posts at -0.5, 0.0 (and +0.5 at span end)
-            const vPosts = isSpanEnd ? [-0.5, 0.0, 0.5] : [-0.5, 0.0];
-            for (const vp of vPosts) {
-              this.quat.identity();
-              this.pos.set(
-                tx + fwdX * vp,
-                BRIDGE_DECK_Y + 0.035 + trussH * 0.5,
-                tz + fwdZ * vp
-              );
-              this.scale.set(0.034, trussH, 0.034);
-              this.mat4.compose(this.pos, this.quat, this.scale);
-              pushBridgeTrussInstance(this.mat4, '#a8321e');
-            }
-
-            // Rising Warren diagonal (-0.5 -> 0.0) & descending Warren diagonal (0.0 -> +0.5)
-            pushBridgeTrussInstance(
-              this.composeSurfaceAlignedBox(
-                tx - fwdX * 0.25,
-                BRIDGE_DECK_Y + 0.035 + trussH * 0.5,
-                tz - fwdZ * 0.25,
-                fwdX * 0.5, trussH, fwdZ * 0.5,
-                rgtX, 0, rgtZ,
-                0.028, 0.028, diagLen, 0.014
-              ),
-              '#c2410c'
-            );
-            pushBridgeTrussInstance(
-              this.composeSurfaceAlignedBox(
-                tx + fwdX * 0.25,
-                BRIDGE_DECK_Y + 0.035 + trussH * 0.5,
-                tz + fwdZ * 0.25,
-                fwdX * 0.5, -trussH, fwdZ * 0.5,
-                rgtX, 0, rgtZ,
-                0.028, 0.028, diagLen, 0.014
-              ),
-              '#c2410c'
-            );
           }
-
-          // Overhead portal cross-strut tying left & right top chords together
-          pushBridgeTrussInstance(
-            this.composeSurfaceAlignedBox(
-              x, BRIDGE_DECK_Y, y,
-              fwdX, 0, fwdZ,
-              rgtX, 0, rgtZ,
-              0.63, 0.032, 0.048, 0.052 + trussH
-            ),
-            '#9a3412'
-          );
         }
 
         continue;
       }
 
-      // 5B. Textured Land Roads + Urban Stone Sidewalks + Shore Bridge Abutment Ramps + Level Crossings
+      // 5B. Textured Land Roads + Urban Stone Sidewalks + Seamless Zero-"Dumpel" Shore Bridge Approaches + Level Crossings
       if (tile.road) {
         const nN = getTileAt(state, x, y - 1);
         const nS = getTileAt(state, x, y + 1);
@@ -1304,38 +1877,124 @@ export class TerrainInstancer {
         const rampS = Boolean(connS && nS?.bridge === 'ROAD');
         const rampE = Boolean(connE && nE?.bridge === 'ROAD');
         const rampW = Boolean(connW && nW?.bridge === 'ROAD');
+        const hasBridgeRamp = rampN || rampS || rampE || rampW;
+        const onXBridge = rampE || rampW;
 
-        const effN = rampN ? BRIDGE_DECK_Y : hN;
-        const effS = rampS ? BRIDGE_DECK_Y : hS;
-        const effE = rampE ? BRIDGE_DECK_Y : hE;
-        const effW = rampW ? BRIDGE_DECK_Y : hW;
+        const minShoreY = Math.max(1, tile.elevation) * ELEV_STEP;
+        let effN = hN;
+        let effS = hS;
+        let effE = hE;
+        let effW = hW;
+        let effHubY = hCenter;
 
-        const hubY = Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
+        if (hasBridgeRamp) {
+          if (onXBridge) {
+            effW = rampW && nW ? getBridgeDeckY(state, nW) : Math.max(hW, minShoreY);
+            effE = rampE && nE ? getBridgeDeckY(state, nE) : Math.max(hE, minShoreY);
+            effHubY = 0.5 * (effW + effE);
+            effN = rampN && nN ? getBridgeDeckY(state, nN) : Math.max(hN, effHubY);
+            effS = rampS && nS ? getBridgeDeckY(state, nS) : Math.max(hS, effHubY);
+          } else {
+            effN = rampN && nN ? getBridgeDeckY(state, nN) : Math.max(hN, minShoreY);
+            effS = rampS && nS ? getBridgeDeckY(state, nS) : Math.max(hS, minShoreY);
+            effHubY = 0.5 * (effN + effS);
+            effE = Math.max(hE, effHubY);
+            effW = Math.max(hW, effHubY);
+          }
+
+          // Full-tile Shore Bridge Abutment Terrace Pad (fills coastal beach dip cleanly from inland edge to water edge)
+          const adjBridge = (rampE ? nE : rampW ? nW : rampS ? nS : nN)!;
+          const adjType: BridgeType = adjBridge.bridgeType ?? 'STEEL';
+          const abutBotY = Math.min(corners.minY, WATER_SURFACE_Y) - 0.08;
+          const abutThick = Math.max(0.20, effHubY - abutBotY + 0.024);
+          const abutHex =
+            adjType === 'WOOD' ? '#6d4124' : adjType === 'MODERN' ? '#f8fafc' : '#cbd5e1';
+          const railHex =
+            adjType === 'WOOD' ? '#a66a38' : adjType === 'MODERN' ? '#e2e8f0' : '#dc2626';
+          const abutWidth = adjType === 'MODERN' ? 0.68 : adjType === 'WOOD' ? 0.58 : 0.62;
+
+          const abFwdX = onXBridge ? 1 : 0;
+          const abFwdY = onXBridge ? effE - effW : effS - effN;
+          const abFwdZ = onXBridge ? 0 : 1;
+          const abRgtX = onXBridge ? 0 : 1;
+          const abRgtZ = onXBridge ? -1 : 0;
+          const abLatX = onXBridge ? 0 : 1;
+          const abLatZ = onXBridge ? 1 : 0;
+          const abLen = Math.hypot(1.0, abFwdY) + 0.03;
+
+          pushBridgeConcInstance(
+            this.composeSurfaceAlignedBox(
+              x, effHubY, y,
+              abFwdX, abFwdY, abFwdZ,
+              abRgtX, 0, abRgtZ,
+              abutWidth, abutThick, abLen, 0.024
+            ),
+            abutHex
+          );
+
+          const paraOff = adjType === 'MODERN' ? 0.312 : adjType === 'WOOD' ? 0.265 : 0.288;
+          for (const sideSign of [-1, 1]) {
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                x + abLatX * (sideSign * paraOff),
+                effHubY,
+                y + abLatZ * (sideSign * paraOff),
+                abFwdX, abFwdY, abFwdZ,
+                abRgtX, 0, abRgtZ,
+                0.030, 0.026, abLen, 0.112
+              ),
+              railHex
+            );
+            if (adjType === 'MODERN') {
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  x + abLatX * (sideSign * 0.342),
+                  effHubY,
+                  y + abLatZ * (sideSign * 0.342),
+                  abFwdX, abFwdY, abFwdZ,
+                  abRgtX, 0, abRgtZ,
+                  0.018, 0.022, abLen, 0.018
+                ),
+                '#38bdf8'
+              );
+            }
+          }
+        }
+
+        const hubY = hasBridgeRamp
+          ? effHubY
+          : Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
+        const hubSlopeNS = hasBridgeRamp ? (onXBridge ? 0 : effS - effN) : hS - hN;
+        const hubSlopeEW = hasBridgeRamp ? (onXBridge ? effE - effW : 0) : hE - hW;
+        const armHubY = hasBridgeRamp ? effHubY : hCenter;
+
         const isUrban = Boolean(tile.townId);
         const hubWidth = isUrban ? 0.66 : 0.54;
 
-        if (isUrban) {
-          if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
-            this.roadUrbanSidewalk.setMatrixAt(
-              urbanSidewalkIdx++,
+        if (!hasBridgeRamp) {
+          if (isUrban) {
+            if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
+              this.roadUrbanSidewalk.setMatrixAt(
+                urbanSidewalkIdx++,
+                this.composeSurfaceAlignedBox(
+                  x, hubY, y,
+                  0, hubSlopeNS, 1,
+                  1, hubSlopeEW, 0,
+                  hubWidth, 0.088, hubWidth, 0.025
+                )
+              );
+            }
+          } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
+            this.roadRuralEmbankment.setMatrixAt(
+              ruralEmbankIdx++,
               this.composeSurfaceAlignedBox(
                 x, hubY, y,
-                0, hS - hN, 1,
-                1, hE - hW, 0,
-                hubWidth, 0.088, hubWidth, 0.025
+                0, hubSlopeNS, 1,
+                1, hubSlopeEW, 0,
+                hubWidth, 0.085, hubWidth, 0.022
               )
             );
           }
-        } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
-          this.roadRuralEmbankment.setMatrixAt(
-            ruralEmbankIdx++,
-            this.composeSurfaceAlignedBox(
-              x, hubY, y,
-              0, hS - hN, 1,
-              1, hE - hW, 0,
-              hubWidth, 0.085, hubWidth, 0.022
-            )
-          );
         }
 
         if (roadSegIdx < MAX_ROAD_SEGMENTS) {
@@ -1343,8 +2002,8 @@ export class TerrainInstancer {
             roadSegIdx++,
             this.composeSurfaceAlignedBox(
               x, hubY, y,
-              0, hS - hN, 1,
-              1, hE - hW, 0,
+              0, hubSlopeNS, 1,
+              1, hubSlopeEW, 0,
               0.46, 0.045, 0.46, 0.029
             )
           );
@@ -1360,76 +2019,52 @@ export class TerrainInstancer {
 
           const midX = x + dx * 0.25;
           const midZ = y + dz * 0.25;
-          const midY = 0.5 * (hCenter + hEdge);
-          const dLong = hEdge - hCenter;
+          const midY = 0.5 * (armHubY + hEdge);
+          const dLong = hEdge - armHubY;
           const armSpatialLen = Math.hypot(0.5, dLong) + 0.045;
 
           let fwdX = 0, fwdY = 0, fwdZ = 1;
           let rgtX = 1, rgtY = 0, rgtZ = 0;
+          const flatCross = hasBridgeRamp || isBridgeRamp;
 
           if (dz === -1) {
-            fwdX = 0; fwdY = hCenter - hEdge; fwdZ = 0.5;
-            rgtX = 1; rgtY = isBridgeRamp ? 0 : cNE - cNW; rgtZ = 0;
+            fwdX = 0; fwdY = armHubY - hEdge; fwdZ = 0.5;
+            rgtX = 1; rgtY = flatCross ? 0 : cNE - cNW; rgtZ = 0;
           } else if (dz === 1) {
-            fwdX = 0; fwdY = hEdge - hCenter; fwdZ = 0.5;
-            rgtX = 1; rgtY = isBridgeRamp ? 0 : cSE - cSW; rgtZ = 0;
+            fwdX = 0; fwdY = hEdge - armHubY; fwdZ = 0.5;
+            rgtX = 1; rgtY = flatCross ? 0 : cSE - cSW; rgtZ = 0;
           } else if (dx === 1) {
-            fwdX = 0.5; fwdY = hEdge - hCenter; fwdZ = 0;
-            rgtX = 0; rgtY = isBridgeRamp ? 0 : cNE - cSE; rgtZ = -1;
+            fwdX = 0.5; fwdY = hEdge - armHubY; fwdZ = 0;
+            rgtX = 0; rgtY = flatCross ? 0 : cNE - cSE; rgtZ = -1;
           } else {
-            fwdX = 0.5; fwdY = hCenter - hEdge; fwdZ = 0;
-            rgtX = 0; rgtY = isBridgeRamp ? 0 : cNW - cSW; rgtZ = -1;
+            fwdX = 0.5; fwdY = armHubY - hEdge; fwdZ = 0;
+            rgtX = 0; rgtY = flatCross ? 0 : cNW - cSW; rgtZ = -1;
           }
 
-          if (isBridgeRamp) {
-            // Solid cut-stone / concrete bridge abutment ramp wall down to water bed + twin approach parapets
-            if (bridgeConcIdx < MAX_BRIDGE_DECKS) {
-              const abutThick = Math.max(0.18, midY - (WATER_SURFACE_Y - 0.08) + 0.024);
-              this.bridgeConcrete.setMatrixAt(
-                bridgeConcIdx++,
+          if (!hasBridgeRamp && !isBridgeRamp) {
+            if (isUrban) {
+              if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
+                this.roadUrbanSidewalk.setMatrixAt(
+                  urbanSidewalkIdx++,
+                  this.composeSurfaceAlignedBox(
+                    midX, midY, midZ,
+                    fwdX, fwdY, fwdZ,
+                    rgtX, rgtY, rgtZ,
+                    hubWidth, 0.088, armSpatialLen + 0.02, 0.025
+                  )
+                );
+              }
+            } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
+              this.roadRuralEmbankment.setMatrixAt(
+                ruralEmbankIdx++,
                 this.composeSurfaceAlignedBox(
                   midX, midY, midZ,
                   fwdX, fwdY, fwdZ,
                   rgtX, rgtY, rgtZ,
-                  0.62, abutThick, armSpatialLen + 0.03, 0.024
+                  hubWidth, 0.085, armSpatialLen + 0.02, 0.022
                 )
               );
             }
-            const latX = dx !== 0 ? 0 : 1;
-            const latZ = dx !== 0 ? 1 : 0;
-            for (const sideOff of [-0.285, 0.285]) {
-              pushBridgeTrussInstance(
-                this.composeSurfaceAlignedBox(
-                  midX + latX * sideOff, midY, midZ + latZ * sideOff,
-                  fwdX, fwdY, fwdZ,
-                  rgtX, rgtY, rgtZ,
-                  0.032, 0.028, armSpatialLen + 0.02, 0.115
-                ),
-                '#dc2626'
-              );
-            }
-          } else if (isUrban) {
-            if (urbanSidewalkIdx < MAX_ROAD_SEGMENTS) {
-              this.roadUrbanSidewalk.setMatrixAt(
-                urbanSidewalkIdx++,
-                this.composeSurfaceAlignedBox(
-                  midX, midY, midZ,
-                  fwdX, fwdY, fwdZ,
-                  rgtX, rgtY, rgtZ,
-                  hubWidth, 0.088, armSpatialLen + 0.02, 0.025
-                )
-              );
-            }
-          } else if (ruralEmbankIdx < MAX_ROAD_SEGMENTS) {
-            this.roadRuralEmbankment.setMatrixAt(
-              ruralEmbankIdx++,
-              this.composeSurfaceAlignedBox(
-                midX, midY, midZ,
-                fwdX, fwdY, fwdZ,
-                rgtX, rgtY, rgtZ,
-                hubWidth, 0.085, armSpatialLen + 0.02, 0.022
-              )
-            );
           }
 
           this.roadAsphalt.setMatrixAt(
@@ -1447,7 +2082,7 @@ export class TerrainInstancer {
             for (const frac of [0.32, 0.76]) {
               const px = x + dx * (0.5 * frac);
               const pz = y + dz * (0.5 * frac);
-              const py = hCenter + (hEdge - hCenter) * frac;
+              const py = armHubY + (hEdge - armHubY) * frac;
               this.roadDashes.setMatrixAt(
                 roadDashIdx++,
                 this.composeSurfaceAlignedBox(
@@ -1466,13 +2101,19 @@ export class TerrainInstancer {
         if (connE) addRoadArm(1, 0, effE, rampE);
         if (connW) addRoadArm(-1, 0, effW, rampW);
 
+        // Extend shore bridge approach seamlessly to the inland edge even before inland roads are connected
+        if (rampE && !connW) addRoadArm(-1, 0, effW, false);
+        if (rampW && !connE) addRoadArm(1, 0, effE, false);
+        if (rampS && !connN) addRoadArm(0, -1, effN, false);
+        if (rampN && !connS) addRoadArm(0, 1, effS, false);
+
         if (!anyConn) {
           addRoadArm(1, 0, hE, false);
           addRoadArm(-1, 0, hW, false);
         }
       }
 
-      // 6. OpenGFX Railways (Pure 90° L-Turn Arcs, Shore Bridge Abutment Ramps, Sleepers + Clips, Steel Rails, Buffers, Crossings)
+      // 6. OpenGFX Railways (Pure 90° L-Turn Arcs, Seamless Zero-"Dumpel" Shore Bridge Approaches, Sleepers + Clips, Steel Rails, Buffers, Crossings)
       if (tile.rail) {
         const nN = getTileAt(state, x, y - 1);
         const nS = getTileAt(state, x, y + 1);
@@ -1491,13 +2132,95 @@ export class TerrainInstancer {
         const rampE = Boolean(connE && nE?.bridge === 'RAIL');
         const rampW = Boolean(connW && nW?.bridge === 'RAIL');
         const hasBridgeRamp = rampN || rampS || rampE || rampW;
+        const onXBridge = rampE || rampW;
 
-        const effN = rampN ? BRIDGE_DECK_Y : hN;
-        const effS = rampS ? BRIDGE_DECK_Y : hS;
-        const effE = rampE ? BRIDGE_DECK_Y : hE;
-        const effW = rampW ? BRIDGE_DECK_Y : hW;
+        const minShoreY = Math.max(1, tile.elevation) * ELEV_STEP;
+        let effN = hN;
+        let effS = hS;
+        let effE = hE;
+        let effW = hW;
+        let effHubY = hCenter;
 
-        const hubY = Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
+        if (hasBridgeRamp) {
+          if (onXBridge) {
+            effW = rampW && nW ? getBridgeDeckY(state, nW) : Math.max(hW, minShoreY);
+            effE = rampE && nE ? getBridgeDeckY(state, nE) : Math.max(hE, minShoreY);
+            effHubY = 0.5 * (effW + effE);
+            effN = rampN && nN ? getBridgeDeckY(state, nN) : Math.max(hN, effHubY);
+            effS = rampS && nS ? getBridgeDeckY(state, nS) : Math.max(hS, effHubY);
+          } else {
+            effN = rampN && nN ? getBridgeDeckY(state, nN) : Math.max(hN, minShoreY);
+            effS = rampS && nS ? getBridgeDeckY(state, nS) : Math.max(hS, minShoreY);
+            effHubY = 0.5 * (effN + effS);
+            effE = Math.max(hE, effHubY);
+            effW = Math.max(hW, effHubY);
+          }
+
+          // Full-tile Shore Bridge Abutment Terrace Pad for Rail Bridges
+          const adjBridge = (rampE ? nE : rampW ? nW : rampS ? nS : nN)!;
+          const adjType: BridgeType = adjBridge.bridgeType ?? 'STEEL';
+          const abutBotY = Math.min(corners.minY, WATER_SURFACE_Y) - 0.08;
+          const abutThick = Math.max(0.20, effHubY - abutBotY + 0.026);
+          const abutHex =
+            adjType === 'WOOD' ? '#6d4124' : adjType === 'MODERN' ? '#f8fafc' : '#cbd5e1';
+          const railHex =
+            adjType === 'WOOD' ? '#a66a38' : adjType === 'MODERN' ? '#e2e8f0' : '#9a3412';
+          const abutWidth = adjType === 'MODERN' ? 0.68 : adjType === 'WOOD' ? 0.58 : 0.64;
+
+          const abFwdX = onXBridge ? 1 : 0;
+          const abFwdY = onXBridge ? effE - effW : effS - effN;
+          const abFwdZ = onXBridge ? 0 : 1;
+          const abRgtX = onXBridge ? 0 : 1;
+          const abRgtZ = onXBridge ? -1 : 0;
+          const abLatX = onXBridge ? 0 : 1;
+          const abLatZ = onXBridge ? 1 : 0;
+          const abLen = Math.hypot(1.0, abFwdY) + 0.03;
+
+          pushBridgeConcInstance(
+            this.composeSurfaceAlignedBox(
+              x, effHubY, y,
+              abFwdX, abFwdY, abFwdZ,
+              abRgtX, 0, abRgtZ,
+              abutWidth, abutThick, abLen, 0.026
+            ),
+            abutHex
+          );
+
+          const paraOff = adjType === 'MODERN' ? 0.312 : adjType === 'WOOD' ? 0.265 : 0.295;
+          for (const sideSign of [-1, 1]) {
+            pushBridgeTrussInstance(
+              this.composeSurfaceAlignedBox(
+                x + abLatX * (sideSign * paraOff),
+                effHubY,
+                y + abLatZ * (sideSign * paraOff),
+                abFwdX, abFwdY, abFwdZ,
+                abRgtX, 0, abRgtZ,
+                0.034, 0.030, abLen, 0.098
+              ),
+              railHex
+            );
+            if (adjType === 'MODERN') {
+              pushBridgeTrussInstance(
+                this.composeSurfaceAlignedBox(
+                  x + abLatX * (sideSign * 0.342),
+                  effHubY,
+                  y + abLatZ * (sideSign * 0.342),
+                  abFwdX, abFwdY, abFwdZ,
+                  abRgtX, 0, abRgtZ,
+                  0.018, 0.022, abLen, 0.018
+                ),
+                '#38bdf8'
+              );
+            }
+          }
+        }
+
+        const hubY = hasBridgeRamp
+          ? effHubY
+          : Math.max(hCenter, 0.5 * (hN + hS), 0.5 * (hE + hW));
+        const hubSlopeNS = hasBridgeRamp ? (onXBridge ? 0 : effS - effN) : hS - hN;
+        const hubSlopeEW = hasBridgeRamp ? (onXBridge ? effE - effW : 0) : hE - hW;
+        const armHubY = hasBridgeRamp ? effHubY : hCenter;
         const gauge = 0.145;
 
         // Draw curved 90-degree corner arc ONLY on a true 2-connection 90° L-turn (NEVER on 3-way/4-way parallel tracks!)
@@ -1645,14 +2368,14 @@ export class TerrainInstancer {
           const dirZ = connS ? 1 : -1;
           addCurvedRailArc(dirX, dirZ, true);
         } else {
-          // Straight / Switch / Terminal / Level-Crossing Rail Geometry
-          if (ballastIdx < MAX_RAIL_BALLAST) {
+          // Straight / Switch / Terminal / Level-Crossing / Bridge-Approach Rail Geometry
+          if (!hasBridgeRamp && ballastIdx < MAX_RAIL_BALLAST) {
             this.railBallast.setMatrixAt(
               ballastIdx++,
               this.composeSurfaceAlignedBox(
                 x, hubY, y,
-                0, hS - hN, 1,
-                1, hE - hW, 0,
+                0, hubSlopeNS, 1,
+                1, hubSlopeEW, 0,
                 0.56, 0.092, 0.56, 0.028
               )
             );
@@ -1666,54 +2389,29 @@ export class TerrainInstancer {
             isBridgeRamp = false
           ): void => {
             const armHoriz = 0.5 * armFraction;
-            const hTarget = hCenter + (hEdgeFull - hCenter) * armFraction;
+            const hTarget = armHubY + (hEdgeFull - armHubY) * armFraction;
             const midX = x + dx * (armHoriz * 0.5);
             const midZ = y + dz * (armHoriz * 0.5);
-            const midY = 0.5 * (hCenter + hTarget);
-            const dLong = hTarget - hCenter;
+            const midY = 0.5 * (armHubY + hTarget);
+            const dLong = hTarget - armHubY;
             const segLen = Math.hypot(armHoriz, dLong) + 0.055;
 
             let fwdX = 0, fwdY = 0, fwdZ = 1;
             let rgtX = 1, rgtY = 0, rgtZ = 0;
+            const flatCross = hasBridgeRamp || isBridgeRamp;
 
             if (dz === -1) {
-              fwdX = 0; fwdY = hCenter - hEdgeFull; fwdZ = 0.5;
-              rgtX = 1; rgtY = isBridgeRamp ? 0 : cNE - cNW; rgtZ = 0;
+              fwdX = 0; fwdY = armHubY - hEdgeFull; fwdZ = 0.5;
+              rgtX = 1; rgtY = flatCross ? 0 : cNE - cNW; rgtZ = 0;
             } else if (dz === 1) {
-              fwdX = 0; fwdY = hEdgeFull - hCenter; fwdZ = 0.5;
-              rgtX = 1; rgtY = isBridgeRamp ? 0 : cSE - cSW; rgtZ = 0;
+              fwdX = 0; fwdY = hEdgeFull - armHubY; fwdZ = 0.5;
+              rgtX = 1; rgtY = flatCross ? 0 : cSE - cSW; rgtZ = 0;
             } else if (dx === 1) {
-              fwdX = 0.5; fwdY = hEdgeFull - hCenter; fwdZ = 0;
-              rgtX = 0; rgtY = isBridgeRamp ? 0 : cNE - cSE; rgtZ = -1;
+              fwdX = 0.5; fwdY = hEdgeFull - armHubY; fwdZ = 0;
+              rgtX = 0; rgtY = flatCross ? 0 : cNE - cSE; rgtZ = -1;
             } else {
-              fwdX = 0.5; fwdY = hCenter - hEdgeFull; fwdZ = 0;
-              rgtX = 0; rgtY = isBridgeRamp ? 0 : cNW - cSW; rgtZ = -1;
-            }
-
-            if (isBridgeRamp && bridgeConcIdx < MAX_BRIDGE_DECKS) {
-              const abutThick = Math.max(0.18, midY - (WATER_SURFACE_Y - 0.08) + 0.026);
-              this.bridgeConcrete.setMatrixAt(
-                bridgeConcIdx++,
-                this.composeSurfaceAlignedBox(
-                  midX, midY, midZ,
-                  fwdX, fwdY, fwdZ,
-                  rgtX, rgtY, rgtZ,
-                  0.64, abutThick, segLen + 0.03, 0.026
-                )
-              );
-              const latX = dx !== 0 ? 0 : 1;
-              const latZ = dx !== 0 ? 1 : 0;
-              for (const sideOff of [-0.295, 0.295]) {
-                pushBridgeTrussInstance(
-                  this.composeSurfaceAlignedBox(
-                    midX + latX * sideOff, midY, midZ + latZ * sideOff,
-                    fwdX, fwdY, fwdZ,
-                    rgtX, rgtY, rgtZ,
-                    0.036, 0.032, segLen + 0.02, 0.095
-                  ),
-                  '#9a3412'
-                );
-              }
+              fwdX = 0.5; fwdY = armHubY - hEdgeFull; fwdZ = 0;
+              rgtX = 0; rgtY = flatCross ? 0 : cNW - cSW; rgtZ = -1;
             }
 
             if (ballastIdx < MAX_RAIL_BALLAST) {
@@ -1723,7 +2421,7 @@ export class TerrainInstancer {
                   midX, midY, midZ,
                   fwdX, fwdY, fwdZ,
                   rgtX, rgtY, rgtZ,
-                  0.55, 0.092, segLen, 0.028
+                  0.55, hasBridgeRamp ? 0.036 : 0.092, segLen, 0.028
                 )
               );
             }
@@ -1739,7 +2437,7 @@ export class TerrainInstancer {
               const frac = sOff / 0.5;
               const sx = x + dx * sOff;
               const sz = y + dz * sOff;
-              const sy = hCenter + (hEdgeFull - hCenter) * frac;
+              const sy = armHubY + (hEdgeFull - armHubY) * frac;
               this.railSleepers.setMatrixAt(
                 sleeperIdx++,
                 this.composeSurfaceAlignedBox(
@@ -1788,10 +2486,16 @@ export class TerrainInstancer {
           if (connE) addStraightRailArm(1, 0, effE, 1.0, rampE);
           if (connW) addStraightRailArm(-1, 0, effW, 1.0, rampW);
 
+          // Extend shore bridge approach seamlessly to the inland edge even before inland rail is connected
+          if (rampE && !connW) addStraightRailArm(-1, 0, effW, 1.0, false);
+          if (rampW && !connE) addStraightRailArm(1, 0, effE, 1.0, false);
+          if (rampS && !connN) addStraightRailArm(0, -1, effN, 1.0, false);
+          if (rampN && !connS) addStraightRailArm(0, 1, effS, 1.0, false);
+
           if (connCount === 0) {
             addStraightRailArm(1, 0, hE, 1.0, false);
             addStraightRailArm(-1, 0, hW, 1.0, false);
-          } else if (connCount === 1 && !tile.stationId && !tile.depot) {
+          } else if (connCount === 1 && !hasBridgeRamp && !tile.stationId && !tile.depot) {
             // Terminal Track End: Detailed Steel A-Frame Buffer Stop + Red/White Warning Beam!
             const oppDx = connE ? -1 : connW ? 1 : 0;
             const oppDz = connS ? -1 : connN ? 1 : 0;
@@ -1844,16 +2548,18 @@ export class TerrainInstancer {
 
           // Center sleeper tie
           if (sleeperIdx < MAX_RAIL_SLEEPERS) {
-            const ewDominant = (connE || connW) && !(connN || connS);
+            const ewDominant = hasBridgeRamp
+              ? onXBridge
+              : (connE || connW) && !(connN || connS);
             this.railSleepers.setMatrixAt(
               sleeperIdx++,
               this.composeSurfaceAlignedBox(
                 x, hubY, y,
                 ewDominant ? 1 : 0,
-                ewDominant ? hE - hW : hS - hN,
+                ewDominant ? hubSlopeEW : hubSlopeNS,
                 ewDominant ? 0 : 1,
                 ewDominant ? 0 : 1,
-                ewDominant ? hN - hS : hE - hW,
+                0,
                 ewDominant ? -1 : 0,
                 0.46, 0.022, 0.064, 0.041
               )
@@ -2043,8 +2749,8 @@ export class TerrainInstancer {
     this.commitInstanced(this.railSteel, railSteelIdx, false);
     this.commitInstanced(this.railWarningBeams, warningBeamIdx, false);
 
-    this.commitInstanced(this.bridgePiers, bridgePierIdx, false);
-    this.commitInstanced(this.bridgeConcrete, bridgeConcIdx, false);
+    this.commitInstanced(this.bridgePiers, bridgePierIdx, true);
+    this.commitInstanced(this.bridgeConcrete, bridgeConcIdx, true);
     this.commitInstanced(this.bridgeTruss, bridgeTrussIdx, true);
   }
 
