@@ -471,11 +471,14 @@ export class TerrainInstancer {
       else if (t.bridgeType === 'STEEL') code |= 2 << 19;
       else if (t.bridgeType === 'MODERN') code |= 3 << 19;
       if (t.bridgeElevation) code |= (t.bridgeElevation & 7) << 21;
+      const stAxis = (t as Tile & { stationAxis?: 'X' | 'Y' }).stationAxis;
+      if (stAxis === 'X') code |= 1 << 24;
+      else if (stAxis === 'Y') code |= 2 << 24;
 
       hash ^= code;
       hash = Math.imul(hash, 16777619) >>> 0;
     }
-    return `${state.mapSize}:${state.networkRevision ?? 0}:${state.stations.length}:${hash}`;
+    return `${state.mapSize}:${state.networkRevision ?? 0}:${state.stations.length}:${state.remotePlayers?.length ?? 0}:${hash}`;
   }
 
   public sync(state: GameState): void {
@@ -633,6 +636,19 @@ export class TerrainInstancer {
     for (let i = 0; i < stations.length; i++) {
       stationKindById.set(stations[i].id, stations[i].kind);
     }
+    if (state.remotePlayers) {
+      for (let p = 0; p < state.remotePlayers.length; p++) {
+        const rStations = state.remotePlayers[p].stations;
+        for (let i = 0; i < rStations.length; i++) {
+          stationKindById.set(rStations[i].id, rStations[i].kind);
+        }
+      }
+    }
+
+    const getStationAxis = (t: Tile): 'X' | 'Y' | undefined => {
+      const axis = (t as Tile & { stationAxis?: 'X' | 'Y' }).stationAxis;
+      return axis === 'X' || axis === 'Y' ? axis : undefined;
+    };
 
     const getBridgeAxis = (t: Tile): 'X' | 'Y' => {
       if (t.bridgeAxis === 'X' || t.bridgeAxis === 'Y') return t.bridgeAxis;
@@ -692,6 +708,10 @@ export class TerrainInstancer {
     ): boolean => {
       if (!toTile) return false;
       const dirAxis: 'X' | 'Y' = dx !== 0 ? 'X' : 'Y';
+      const fromStationAxis = fromTile.stationId ? getStationAxis(fromTile) : undefined;
+      if (fromStationAxis && fromStationAxis !== dirAxis) return false;
+      const toStationAxis = toTile.stationId ? getStationAxis(toTile) : undefined;
+      if (toStationAxis && toStationAxis !== dirAxis) return false;
       if (fromTile.bridge) {
         if (fromTile.bridge !== 'RAIL') return false;
         if (getBridgeAxis(fromTile) !== dirAxis) return false;
@@ -2492,9 +2512,22 @@ export class TerrainInstancer {
           if (rampS && !connN) addStraightRailArm(0, -1, effN, 1.0, false);
           if (rampN && !connS) addStraightRailArm(0, 1, effS, 1.0, false);
 
+          const tileStationAxis = tile.stationId ? getStationAxis(tile) : undefined;
+
           if (connCount === 0) {
-            addStraightRailArm(1, 0, hE, 1.0, false);
-            addStraightRailArm(-1, 0, hW, 1.0, false);
+            if (tileStationAxis === 'Y') {
+              addStraightRailArm(0, 1, hS, 1.0, false);
+              addStraightRailArm(0, -1, hN, 1.0, false);
+            } else {
+              addStraightRailArm(1, 0, hE, 1.0, false);
+              addStraightRailArm(-1, 0, hW, 1.0, false);
+            }
+          } else if (connCount === 1 && tile.stationId && !hasBridgeRamp) {
+            // Ensure station platform end-tiles render full-length straight rails along the platform axis
+            const oppDx = connE ? -1 : connW ? 1 : 0;
+            const oppDz = connS ? -1 : connN ? 1 : 0;
+            const oppEdgeH = oppDx === 1 ? effE : oppDx === -1 ? effW : oppDz === 1 ? effS : effN;
+            addStraightRailArm(oppDx, oppDz, oppEdgeH, 1.0, false);
           } else if (connCount === 1 && !hasBridgeRamp && !tile.stationId && !tile.depot) {
             // Terminal Track End: Detailed Steel A-Frame Buffer Stop + Red/White Warning Beam!
             const oppDx = connE ? -1 : connW ? 1 : 0;
@@ -2548,7 +2581,9 @@ export class TerrainInstancer {
 
           // Center sleeper tie
           if (sleeperIdx < MAX_RAIL_SLEEPERS) {
-            const ewDominant = hasBridgeRamp
+            const ewDominant = tileStationAxis
+              ? tileStationAxis === 'X'
+              : hasBridgeRamp
               ? onXBridge
               : (connE || connW) && !(connN || connS);
             this.railSleepers.setMatrixAt(

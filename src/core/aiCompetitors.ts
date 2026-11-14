@@ -230,8 +230,23 @@ function placeStationRecord(
   t.terrain = 'GRASS';
   t.stationId = id;
   t.ownerId = ownerId;
+  let stationAxis: 'X' | 'Y' = 'X';
   if (kind === 'TRAIN_STATION') {
     t.rail = true;
+    const hasRailX =
+      (inBounds(pt.x - 1, pt.y, state.mapSize) &&
+        state.tiles[tileIndex(pt.x - 1, pt.y, state.mapSize)].rail) ||
+      (inBounds(pt.x + 1, pt.y, state.mapSize) &&
+        state.tiles[tileIndex(pt.x + 1, pt.y, state.mapSize)].rail);
+    const hasRailY =
+      (inBounds(pt.x, pt.y - 1, state.mapSize) &&
+        state.tiles[tileIndex(pt.x, pt.y - 1, state.mapSize)].rail) ||
+      (inBounds(pt.x, pt.y + 1, state.mapSize) &&
+        state.tiles[tileIndex(pt.x, pt.y + 1, state.mapSize)].rail);
+    stationAxis = hasRailY && !hasRailX ? 'Y' : 'X';
+    if (!(hasRailX && hasRailY)) {
+      t.stationAxis = stationAxis;
+    }
   } else {
     t.road = true;
   }
@@ -258,6 +273,9 @@ function placeStationRecord(
     x: pt.x,
     y: pt.y,
     tiles: [{ x: pt.x, y: pt.y }],
+    ...(kind === 'TRAIN_STATION'
+      ? { orientation: stationAxis, tracks: 1, platformLength: 1 }
+      : {}),
     townId: null,
     nearbyIndustryIds: [],
     waitingCargo: createEmptyCargoRecord(),
@@ -621,8 +639,16 @@ export function buildConnectedRoute(
       mainCorridor.find(
         (p, idx) =>
           idx > 0 &&
+          idx < mainCorridor.length - 1 &&
+          state.tiles[tileIndex(p.x, p.y, state.mapSize)].terrain !== 'WATER' &&
+          findDepotTileAdjacentTo(state, p) !== null
+      ) ??
+      mainCorridor.find(
+        (p, idx) =>
+          idx > 0 &&
           state.tiles[tileIndex(p.x, p.y, state.mapSize)].terrain !== 'WATER'
-      ) ?? ptA;
+      ) ??
+      ptA;
     const depotPt =
       findDepotTileAdjacentTo(state, depotAnchor) ??
       findDepotTileAdjacentTo(state, ptA) ??
@@ -634,6 +660,13 @@ export function buildConnectedRoute(
       dt.rail = true;
       dt.depot = 'RAIL';
       dt.ownerId = ownerId;
+      if (Math.abs(depotPt.x - ptA.x) + Math.abs(depotPt.y - ptA.y) === 1) {
+        const depAxis: 'X' | 'Y' = depotPt.x !== ptA.x ? 'X' : 'Y';
+        const ptATile = state.tiles[tileIndex(ptA.x, ptA.y, state.mapSize)];
+        if (ptATile.stationAxis && ptATile.stationAxis !== depAxis) {
+          ptATile.stationAxis = undefined;
+        }
+      }
     }
 
     const locoModel: VehicleModelId =

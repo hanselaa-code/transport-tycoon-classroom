@@ -1917,7 +1917,8 @@ export class StructuresRenderer {
     // 1. Waiting Passengers (tiny colorful figures distributed across all platform tiles)
     const paxTotal = Math.max(0, Math.round(waiting.PASSENGERS || 0));
     if (paxTotal > 0) {
-      const totalFigures = Math.min(18, Math.max(1, Math.ceil(paxTotal / 7)));
+      const maxTotalFigures = Math.min(40, Math.max(18, totalTiles * 3));
+      const totalFigures = Math.min(maxTotalFigures, Math.max(1, Math.ceil(paxTotal / 7)));
       const myFigures = Math.floor(totalFigures / totalTiles) + (tileIndex < totalFigures % totalTiles ? 1 : 0);
       for (let p = 0; p < myFigures; p++) {
         const seed = p * 7 + tileIndex * 13;
@@ -1937,7 +1938,8 @@ export class StructuresRenderer {
     for (const cType of freightTypes) {
       const amt = Math.max(0, Math.round(waiting[cType] || 0));
       if (amt <= 0) continue;
-      const totalPiles = Math.min(8, Math.max(1, Math.ceil(amt / 14)));
+      const maxTotalPiles = Math.min(28, Math.max(8, totalTiles * 2));
+      const totalPiles = Math.min(maxTotalPiles, Math.max(1, Math.ceil(amt / 14)));
       const myPiles = Math.floor(totalPiles / totalTiles) + (tileIndex < totalPiles % totalTiles ? 1 : 0);
 
       for (let k = 0; k < myPiles && slotIdx < maxSlotsPerTile; k++) {
@@ -2093,6 +2095,174 @@ export class StructuresRenderer {
     this.buildingsGroup.add(g);
   }
 
+  private resolveTrainStationLayout(
+    station: Station,
+    state: GameState
+  ): {
+    axis: 'X' | 'Y';
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    platformLength: number;
+    tracks: number;
+    centerX: number;
+    centerZ: number;
+    minCornerY: number;
+    maxCornerY: number;
+  } {
+    const tiles =
+      station.tiles && station.tiles.length > 0
+        ? station.tiles
+        : [{ x: station.x, y: station.y }];
+
+    let minX = tiles[0].x;
+    let maxX = tiles[0].x;
+    let minY = tiles[0].y;
+    let maxY = tiles[0].y;
+    let tileAxisHint: 'X' | 'Y' | null = null;
+
+    for (let i = 0; i < tiles.length; i++) {
+      const tx = tiles[i].x;
+      const ty = tiles[i].y;
+      if (tx < minX) minX = tx;
+      if (tx > maxX) maxX = tx;
+      if (ty < minY) minY = ty;
+      if (ty > maxY) maxY = ty;
+      if (!tileAxisHint) {
+        const mapTile = getTileAt(state, tx, ty);
+        if (mapTile?.stationAxis === 'X' || mapTile?.stationAxis === 'Y') {
+          tileAxisHint = mapTile.stationAxis;
+        }
+      }
+    }
+
+    const rawSpanX = maxX - minX + 1;
+    const rawSpanY = maxY - minY + 1;
+
+    let axis: 'X' | 'Y' = 'X';
+    if (station.orientation === 'X' || station.orientation === 'Y') {
+      axis = station.orientation;
+    } else if (tileAxisHint) {
+      axis = tileAxisHint;
+    } else if (rawSpanX > rawSpanY) {
+      axis = 'X';
+    } else if (rawSpanY > rawSpanX) {
+      axis = 'Y';
+    } else {
+      const nN = getTileAt(state, minX, minY - 1);
+      const nS = getTileAt(state, minX, maxY + 1);
+      const nW = getTileAt(state, minX - 1, minY);
+      const nE = getTileAt(state, maxX + 1, minY);
+      if ((nN?.rail || nS?.rail) && !(nW?.rail || nE?.rail)) {
+        axis = 'Y';
+      }
+    }
+
+    const spanAlong = axis === 'X' ? rawSpanX : rawSpanY;
+    const spanAcross = axis === 'X' ? rawSpanY : rawSpanX;
+
+    const platformLength = Math.max(
+      1,
+      Math.min(6, Math.max(spanAlong, Math.round(station.platformLength ?? spanAlong)))
+    );
+    const tracks = Math.max(
+      1,
+      Math.min(4, Math.max(spanAcross, Math.round(station.tracks ?? spanAcross)))
+    );
+
+    if (axis === 'X') {
+      maxX = Math.max(maxX, minX + platformLength - 1);
+      maxY = Math.max(maxY, minY + tracks - 1);
+    } else {
+      maxX = Math.max(maxX, minX + tracks - 1);
+      maxY = Math.max(maxY, minY + platformLength - 1);
+    }
+
+    let minCornerY = Infinity;
+    let maxCornerY = -Infinity;
+    for (let ty = minY; ty <= maxY; ty++) {
+      for (let tx = minX; tx <= maxX; tx++) {
+        const c = getTileCornerHeights(state, tx, ty);
+        if (c.minY < minCornerY) minCornerY = c.minY;
+        if (c.maxY > maxCornerY) maxCornerY = c.maxY;
+      }
+    }
+    if (!Number.isFinite(minCornerY) || !Number.isFinite(maxCornerY)) {
+      const c0 = getTileCornerHeights(state, minX, minY);
+      minCornerY = c0.minY;
+      maxCornerY = c0.maxY;
+    }
+
+    return {
+      axis,
+      minX,
+      maxX,
+      minY,
+      maxY,
+      platformLength,
+      tracks,
+      centerX: (minX + maxX) * 0.5,
+      centerZ: (minY + maxY) * 0.5,
+      minCornerY,
+      maxCornerY,
+    };
+  }
+
+  private addStationNameboard(
+    parent: THREE.Object3D,
+    lx: number,
+    ySurface: number,
+    lz: number,
+    ownerColor: string,
+    width = 0.22
+  ): void {
+    const postOff = width * 0.36;
+    this.addBox(parent, 0.014, 0.085, 0.014, lx - postOff, ySurface, lz, '#cbd5e1');
+    this.addBox(parent, 0.014, 0.085, 0.014, lx + postOff, ySurface, lz, '#cbd5e1');
+    this.addBox(parent, width, 0.052, 0.024, lx, ySurface + 0.072, lz, ownerColor);
+    this.addBox(parent, width - 0.024, 0.028, 0.028, lx, ySurface + 0.084, lz, '#f8fafc');
+  }
+
+  private addPlatformLamp(
+    parent: THREE.Object3D,
+    lx: number,
+    ySurface: number,
+    lz: number
+  ): void {
+    this.addCyl(parent, 0.01, 0.19, lx, ySurface, lz, '#1e293b', undefined, true);
+    const lampOrb = new THREE.Mesh(
+      this.sphereGeo,
+      this.getMat('#fef08a', '#facc15', 0.55)
+    );
+    lampOrb.scale.set(0.042, 0.042, 0.042);
+    lampOrb.position.set(lx, ySurface + 0.2, lz);
+    parent.add(lampOrb);
+  }
+
+  private addStationClockDial(
+    parent: THREE.Object3D,
+    lx: number,
+    ly: number,
+    lz: number,
+    radius: number,
+    faceDirZ: 1 | -1
+  ): void {
+    const dial = new THREE.Mesh(
+      this.cylLowGeo,
+      this.getMat('#fefce8', '#fde047', 0.45)
+    );
+    dial.rotation.x = Math.PI / 2;
+    dial.scale.set(radius * 2, 0.018, radius * 2);
+    dial.position.set(lx, ly, lz);
+    parent.add(dial);
+
+    // Crisp dark minute & hour hands
+    const handZ = lz + faceDirZ * 0.011;
+    this.addBox(parent, 0.008, radius * 0.78, 0.006, lx, ly + radius * 0.08, handZ, '#0f172a');
+    this.addBox(parent, radius * 0.58, 0.008, 0.006, lx + radius * 0.18, ly, handZ, '#0f172a');
+  }
+
   private buildStation(station: Station, ownerColor: string, state: GameState): void {
     const tiles =
       station.tiles && station.tiles.length > 0
@@ -2100,137 +2270,402 @@ export class StructuresRenderer {
         : [{ x: station.x, y: station.y }];
 
     if (station.kind === 'TRAIN_STATION') {
-      let alongEW = true;
-      if (tiles.length >= 2) {
-        alongEW = Math.abs(tiles[1].x - tiles[0].x) >= Math.abs(tiles[1].y - tiles[0].y);
+      const layout = this.resolveTrainStationLayout(station, state);
+      const { axis, minX, maxY, minY, platformLength: L, tracks: T, minCornerY, maxCornerY } = layout;
+      const drop = Math.max(0.055, maxCornerY - (minCornerY - 0.05));
+
+      // Local station coordinate frame:
+      //   lx in [0 .. L-1] runs ALONG the platform length (total span [-0.49 .. (L-1)+0.49])
+      //   lz in [0 .. T-1] steps PERPENDICULAR across parallel tracks (track t rail centerline is at lz = t!)
+      // For axis === 'X': origin = (minX, maxCornerY, minY), rotY = 0 -> world = (minX + lx, y, minY + lz)
+      // For axis === 'Y': origin = (minX, maxCornerY, maxY), rotY = +PI/2 -> world = (minX + lz, y, maxY - lx)
+      const root = new THREE.Group();
+      if (axis === 'X') {
+        root.position.set(minX, maxCornerY, minY);
       } else {
-        const t0 = tiles[0];
-        const nN = getTileAt(state, t0.x, t0.y - 1);
-        const nS = getTileAt(state, t0.x, t0.y + 1);
-        if (nN?.rail || nS?.rail) alongEW = false;
+        root.position.set(minX, maxCornerY, maxY);
+        root.rotation.y = Math.PI / 2;
       }
 
-      const masterIdx = Math.floor((tiles.length - 1) * 0.5);
+      // If built on a hillside edge, anchor a flush cut-stone retaining terrace below rail ballast level (y <= -0.014)
+      if (drop > 0.09) {
+        const totalSpanZ = T + 0.02;
+        this.addTexBox(
+          root,
+          L - 0.02,
+          drop - 0.014,
+          totalSpanZ,
+          (L - 1) * 0.5,
+          -drop,
+          (T - 1) * 0.5,
+          'ashlarStone',
+          Math.max(1, L * 2),
+          Math.max(1, Math.round(drop * 2)),
+          Math.max(1, T * 2)
+        );
+      }
 
-      for (let i = 0; i < tiles.length; i++) {
-        const tx = tiles[i].x;
-        const ty = tiles[i].y;
-        const corners = getTileCornerHeights(state, tx, ty);
-        const drop = corners.maxY - (corners.minY - 0.05);
+      const midX = (L - 1) * 0.5;
+      const platLen = L - 0.02;
+      const repAlongStone = Math.max(1, L * 2);
+      const repAlongPave = Math.max(1, L * 3);
+      const ySurf = 0.102;
 
-        const g = new THREE.Group();
-        g.position.set(tx, corners.maxY, ty);
-        if (!alongEW) {
-          g.rotation.y = Math.PI / 2;
+      const outerAz = -0.375;
+      const outerBz = (T - 1) + 0.375;
+      const safetyAz = -0.273;
+      const safetyBz = (T - 1) + 0.273;
+
+      // =====================================================================
+      // 1. OUTER RAISED STONE/CONCRETE PLATFORMS + YELLOW TACTILE SAFETY STRIPS
+      //    Leaves every track bed t in [0..T-1] (lz in [t-0.26 .. t+0.26]) 100% clear!
+      // =====================================================================
+      this.addTexBox(root, platLen, drop + 0.08, 0.225, midX, -drop, outerAz, 'ashlarStone', repAlongStone, 1, 1);
+      this.addTexBox(root, platLen, drop + 0.08, 0.225, midX, -drop, outerBz, 'ashlarStone', repAlongStone, 1, 1);
+      this.addTexBox(root, platLen + 0.01, 0.026, 0.236, midX, 0.076, outerAz, 'platformPaving', repAlongPave, 1, 1);
+      this.addTexBox(root, platLen + 0.01, 0.026, 0.236, midX, 0.076, outerBz, 'platformPaving', repAlongPave, 1, 1);
+
+      // Crisp yellow safety strips along outer platforms facing Track 0 and Track T-1
+      this.addBox(root, platLen + 0.01, 0.012, 0.024, midX, ySurf - 0.002, safetyAz, '#facc15');
+      this.addBox(root, platLen + 0.01, 0.012, 0.024, midX, ySurf - 0.002, safetyBz, '#facc15');
+
+      // Sloped stone end-curbs on outer platforms
+      for (const endX of [-0.485, L - 0.515]) {
+        this.addBox(root, 0.028, 0.065, 0.236, endX, 0.02, outerAz, '#94a3b8');
+        this.addBox(root, 0.028, 0.065, 0.236, endX, 0.02, outerBz, '#94a3b8');
+      }
+
+      // =====================================================================
+      // 2. SHARED NARROW ISLAND PLATFORMS BETWEEN PARALLEL TRACKS (T >= 2)
+      //    Centered on seam lz = s + 0.5 (width 0.43 -> lz in [s+0.285 .. s+0.715]),
+      //    with dual yellow tactile safety strips facing Track s and Track s+1!
+      // =====================================================================
+      for (let s = 0; s < T - 1; s++) {
+        const iz = s + 0.5;
+        this.addTexBox(root, platLen, drop + 0.08, 0.415, midX, -drop, iz, 'ashlarStone', repAlongStone, 1, 1);
+        this.addTexBox(root, platLen + 0.01, 0.026, 0.432, midX, 0.076, iz, 'platformPaving', repAlongPave, 1, 1);
+
+        // Dual yellow safety strips on BOTH sides of the shared island platform
+        this.addBox(root, platLen + 0.01, 0.012, 0.022, midX, ySurf - 0.002, iz - 0.198, '#facc15');
+        this.addBox(root, platLen + 0.01, 0.012, 0.022, midX, ySurf - 0.002, iz + 0.198, '#facc15');
+
+        // Stone end-ramps on island platform ends
+        for (const endX of [-0.485, L - 0.515]) {
+          this.addBox(root, 0.028, 0.065, 0.432, endX, 0.02, iz, '#94a3b8');
         }
 
-        // 1. Flanking Stone-Retained Concrete Platforms (keeps center rail z in [-0.24..0.24] 100% clear!)
-        this.addTexBox(g, 0.98, drop + 0.085, 0.22, 0, -drop, -0.36, 'ashlarStone', 2, 1, 1);
-        this.addTexBox(g, 0.98, drop + 0.085, 0.22, 0, -drop, 0.36, 'ashlarStone', 2, 1, 1);
-        this.addTexBox(g, 0.99, 0.028, 0.235, 0, 0.072, -0.36, 'platformPaving', 3, 1, 1);
-        this.addTexBox(g, 0.99, 0.028, 0.235, 0, 0.072, 0.36, 'platformPaving', 3, 1, 1);
-
-        // Crisp yellow tactile platform safety strips
-        this.addBox(g, 0.99, 0.012, 0.026, 0, 0.098, -0.258, '#facc15');
-        this.addBox(g, 0.99, 0.012, 0.026, 0, 0.098, 0.258, '#facc15');
-
-        // 2. OpenTTD Arched Steel-Truss & Glazed Train-Shed Canopy Roof (y >= 0.46 clear over trains!)
-        for (const px of [-0.36, 0.36]) {
-          this.addBox(g, 0.036, 0.37, 0.036, px, 0.1, -0.38, '#334155');
-          this.addBox(g, 0.036, 0.37, 0.036, px, 0.1, 0.38, '#334155');
-          // Steel transverse truss tie beam
-          this.addBox(g, 0.028, 0.026, 0.8, px, 0.455, 0, '#475569');
+        // Pedestrian underpass stairwell hood on longer multi-track island platforms (L >= 3)
+        const hasUnderpass = L >= 3;
+        if (hasUnderpass) {
+          this.addBox(root, 0.3, 0.022, 0.14, midX, ySurf, iz, '#1e293b');
+          this.addBox(root, 0.28, 0.11, 0.13, midX, ySurf + 0.022, iz, '#bae6fd', '#38bdf8', 0.2);
+          this.addBox(root, 0.32, 0.024, 0.155, midX, ySurf + 0.132, iz, ownerColor);
         }
-        // Company-colored side valence fascias along canopy eaves
-        this.addBox(g, 0.99, 0.055, 0.04, 0, 0.45, -0.45, ownerColor);
-        this.addBox(g, 0.99, 0.055, 0.04, 0, 0.45, 0.45, ownerColor);
 
-        // Pitched steel side canopy wings + bright glazed central skylight vault
-        for (const side of [-1, 1]) {
-          const wing = new THREE.Mesh(
-            this.getTiledBoxGeo(3, 1, 1),
-            this.getMat('#cbd5e1', undefined, 0, 'corrugatedSteel')
-          );
-          wing.scale.set(0.99, 0.026, 0.28);
-          wing.position.set(0, 0.5, side * 0.32);
-          wing.rotation.x = side * 0.24;
-          this.markShadow(wing, true, true);
-          g.add(wing);
+        // Island platform furniture: benches, warm globe lamps & company station nameboards
+        for (let l = 0; l < L; l++) {
+          if (hasUnderpass && Math.abs(l - midX) < 0.35) continue;
+          if ((l + s) % 2 === 0) {
+            this.addStationNameboard(root, l - 0.16, ySurf, iz, ownerColor, 0.22);
+            this.addBox(root, 0.18, 0.038, 0.055, l + 0.18, ySurf, iz, '#78350f');
+          } else {
+            this.addPlatformLamp(root, l, ySurf, iz);
+            this.addBox(root, 0.18, 0.038, 0.055, l - 0.2, ySurf, iz, '#78350f');
+          }
         }
-        this.addBox(g, 0.99, 0.032, 0.4, 0, 0.525, 0, '#bae6fd', '#38bdf8', 0.24);
-        this.addBox(g, 0.99, 0.022, 0.04, 0, 0.555, 0, ownerColor);
+      }
 
-        // 3. Detailed Brick Station-Master Building on Primary Tile (Clock Gable + Ticket Windows)
-        if (i === masterIdx) {
-          this.addTexBox(g, 0.64, 0.25, 0.16, 0, 0.1, -0.41, 'brickRedWindowLit', 3, 1, 1);
-          this.addGableRoof(
-            g,
-            0.64,
-            0.12,
-            0.16,
-            0,
-            0.35,
-            -0.41,
-            'roofSlate',
-            'brickRedPlain',
-            '#ffffff',
-            false,
-            0.025
-          );
-          // Station clock turret + illuminated white clock dial facing tracks!
-          this.addBox(g, 0.13, 0.12, 0.12, 0, 0.42, -0.4, '#9a3424');
-          const clockFace = new THREE.Mesh(
-            this.cylLowGeo,
-            this.getMat('#fefce8', '#fde047', 0.4)
-          );
-          clockFace.rotation.x = Math.PI / 2;
-          clockFace.scale.set(0.085, 0.02, 0.085);
-          clockFace.position.set(0, 0.48, -0.335);
-          g.add(clockFace);
+      // =====================================================================
+      // 3. ARCHED STEEL-TRUSS & GLAZED MULTI-SPAN TRAIN-SHED CANOPY (y >= 0.465)
+      //    Spans across all tracks (1..4) and full platform length (1..6)
+      //    with stanchions strictly on platforms so trains glide unobstructed!
+      // =====================================================================
+      const colRowsZ: number[] = [-0.395];
+      for (let s = 0; s < T - 1; s++) {
+        colRowsZ.push(s + 0.5);
+      }
+      colRowsZ.push((T - 1) + 0.395);
+
+      const shedSpanZ = (T - 1) + 0.84;
+      const shedMidZ = (T - 1) * 0.5;
+
+      // Steel stanchion columns & transverse portal truss tie-beams along platform length
+      for (let l = 0; l < L; l++) {
+        const colOffsets = L === 1 ? [-0.35, 0.35] : l === L - 1 ? [-0.38, 0.38] : [-0.38];
+        for (const dx of colOffsets) {
+          const cx = l + dx;
+          for (let r = 0; r < colRowsZ.length; r++) {
+            const cz = colRowsZ[r];
+            this.addBox(root, 0.034, 0.368, 0.034, cx, ySurf, cz, '#334155');
+            this.addBox(root, 0.052, 0.024, 0.052, cx, ySurf, cz, '#475569');
+          }
+          // Transverse steel lattice tie-beam high above trains (y = 0.462)
+          this.addBox(root, 0.026, 0.026, shedSpanZ, cx, 0.462, shedMidZ, '#475569');
+        }
+      }
+
+      // Longitudinal steel valley box-girders along each column row
+      for (let r = 0; r < colRowsZ.length; r++) {
+        this.addBox(root, platLen + 0.01, 0.032, 0.042, midX, 0.458, colRowsZ[r], '#334155');
+      }
+
+      // Outer company-colored valence fascias along both sides of the train shed
+      this.addBox(root, platLen + 0.02, 0.058, 0.038, midX, 0.452, -0.462, ownerColor);
+      this.addBox(root, platLen + 0.02, 0.058, 0.038, midX, 0.452, (T - 1) + 0.462, ownerColor);
+
+      // Arched Steel & Glazed Barrel-Vault Bay over EVERY Track t = 0 .. T-1
+      const wingSlopeGeo = this.getTiledBoxGeo(Math.max(1, L * 3), 1, 1);
+      const corruMat = this.getMat('#cbd5e1', undefined, 0, 'corrugatedSteel');
+      const skylightMat = this.getMat('#bae6fd', '#38bdf8', 0.26);
+
+      for (let t = 0; t < T; t++) {
+        // Lower pitched corrugated-steel roof shoulders on both sides of track t
+        for (const side of [-1, 1] as const) {
+          const shoulder = new THREE.Mesh(wingSlopeGeo, corruMat);
+          shoulder.scale.set(platLen + 0.01, 0.024, 0.28);
+          shoulder.position.set(midX, 0.502, t + side * 0.315);
+          shoulder.rotation.x = side * 0.25;
+          this.markShadow(shoulder, true, true);
+          root.add(shoulder);
+
+          // Upper angled glazed skylight panel forming the arched crown
+          const glass = new THREE.Mesh(this.boxGeo, skylightMat);
+          glass.scale.set(platLen + 0.01, 0.026, 0.23);
+          glass.position.set(midX, 0.548, t + side * 0.105);
+          glass.rotation.x = side * 0.11;
+          this.markShadow(glass, true, false);
+          root.add(glass);
+        }
+
+        // Raised company-colored ridge ventilator strip along crest of track t's vault
+        this.addBox(root, platLen + 0.02, 0.024, 0.044, midX, 0.568, t, ownerColor);
+
+        // Transverse steel arch ribs at every tile seam + glazed portal end-screens (y >= 0.48)
+        for (let rIdx = 0; rIdx <= L; rIdx++) {
+          const rx = rIdx === 0 ? -0.485 : rIdx === L ? L - 0.515 : rIdx - 0.5;
+          this.addBox(root, 0.026, 0.024, 0.54, rx, 0.545, t, '#334155');
+          if (rIdx === 0 || rIdx === L) {
+            // Glazed semi-elliptical portal transom high above the track entrance/exit
+            this.addBox(root, 0.018, 0.068, 0.62, rx, 0.482, t, '#93c5fd', '#38bdf8', 0.18);
+            this.addBox(root, 0.028, 0.02, 0.88, rx, 0.468, t, ownerColor);
+          }
+        }
+      }
+
+      // =====================================================================
+      // 4. AUTHENTIC BRICK & SLATE CLOCK-TOWER STATION HEADHOUSE (L >= 2)
+      //    (Plus charming brick ticket lodge when L === 1)
+      //    Positioned on Outer Platform A (lz = -0.415) so Track 0 stays 100% clear!
+      // =====================================================================
+      if (L >= 2) {
+        const mainW = Math.min(1.72, 0.84 + (L - 2) * 0.24);
+        const mainH = 0.29;
+        const hz = -0.415;
+        const hd = 0.155;
+
+        // Dressed granite plinth + multi-pane lit Victorian red-brick main concourse hall
+        this.addBox(root, mainW + 0.03, 0.03, hd + 0.015, midX, ySurf, hz, '#e2e8f0');
+        this.addTexBox(
+          root,
+          mainW,
+          mainH,
+          hd,
+          midX,
+          ySurf + 0.03,
+          hz,
+          'brickRedWindowLit',
+          Math.max(2, Math.round(mainW * 3)),
+          2,
+          1
+        );
+        // Stone eaves cornice + steep slate gable roof
+        this.addBox(root, mainW + 0.03, 0.02, hd + 0.02, midX, ySurf + 0.03 + mainH, hz, '#f1f5f9');
+        this.addGableRoof(
+          root,
+          mainW,
+          0.145,
+          hd,
+          midX,
+          ySurf + 0.05 + mainH,
+          hz,
+          'roofSlate',
+          'brickRedPlain',
+          '#ffffff',
+          false,
+          0.026
+        );
+
+        // Brick chimneys & slate dormers on L >= 3 headhouses
+        if (L >= 3) {
+          const chOff = mainW * 0.38;
+          this.addChimney(root, midX - chOff, ySurf + 0.06 + mainH, hz - 0.02, 0.17, true);
+          this.addChimney(root, midX + chOff, ySurf + 0.06 + mainH, hz - 0.02, 0.17, true);
+          this.addDormer(root, midX - mainW * 0.26, ySurf + 0.07 + mainH, hz + 0.035, 0, '#f8fafc');
+          this.addDormer(root, midX + mainW * 0.26, ySurf + 0.07 + mainH, hz + 0.035, 0, '#f8fafc');
+        }
+
+        // Symmetrical single-story brick luggage & waiting-room pavilions on longer stations (L >= 4)
+        if (L >= 4) {
+          const wingW = Math.min(0.62, 0.3 + (L - 4) * 0.15);
+          for (const side of [-1, 1] as const) {
+            const wx = midX + side * (mainW * 0.5 + wingW * 0.5 - 0.01);
+            this.addTexBox(root, wingW, 0.21, 0.14, wx, ySurf + 0.02, hz, 'brickRedWindow', 2, 1, 1);
+            this.addGableRoof(
+              root,
+              wingW,
+              0.1,
+              0.14,
+              wx,
+              ySurf + 0.23,
+              hz,
+              'roofSlate',
+              'brickRedPlain',
+              '#ffffff',
+              false,
+              0.022
+            );
+          }
+        }
+
+        // Prominent Central Brick & Slate Clock Tower rising above the Headhouse!
+        const towerW = 0.24;
+        const towerD = 0.165;
+        const towerBaseY = ySurf + 0.03;
+        const towerH = 0.56;
+        this.addTexBox(root, towerW, towerH, towerD, midX, towerBaseY, hz, 'brickRedPlain', 1, 3, 1);
+        // White stone stringcourses & belfry cornice
+        this.addBox(root, towerW + 0.024, 0.02, towerD + 0.02, midX, towerBaseY + 0.34, hz, '#f8fafc');
+        this.addBox(root, towerW + 0.03, 0.024, towerD + 0.026, midX, towerBaseY + towerH, hz, '#f8fafc');
+
+        // Steep slate hip/belfry spire + golden finial weathervane
+        this.addHipRoof(
+          root,
+          towerW,
+          0.21,
+          towerD,
+          midX,
+          towerBaseY + towerH + 0.024,
+          hz,
+          'roofSlate',
+          ownerColor,
+          0.028
+        );
+        this.addCyl(root, 0.01, 0.11, midX, towerBaseY + towerH + 0.24, hz, '#fbbf24', undefined, true);
+
+        // Dual illuminated white & gold station clock dials (facing tracks +Z and town street -Z!)
+        const clockY = towerBaseY + 0.455;
+        this.addStationClockDial(root, midX, clockY, hz + towerD * 0.5 + 0.004, 0.068, 1);
+        this.addStationClockDial(root, midX, clockY, hz - towerD * 0.5 - 0.004, 0.068, -1);
+
+        // Trackside ticket-hall double doors + company-colored entrance portico
+        this.addBox(root, 0.14, 0.14, 0.02, midX, ySurf + 0.03, hz + hd * 0.5 + 0.004, '#451a03');
+        this.addBox(root, 0.28, 0.032, 0.065, midX, ySurf + 0.185, hz + hd * 0.5 + 0.024, ownerColor);
+      } else {
+        // L === 1: Compact Brick Station-Master Lodge with Slate Gable & Trackside Clock
+        this.addTexBox(root, 0.62, 0.25, 0.15, 0, ySurf, -0.415, 'brickRedWindowLit', 3, 1, 1);
+        this.addGableRoof(
+          root,
+          0.62,
+          0.12,
+          0.15,
+          0,
+          ySurf + 0.25,
+          -0.415,
+          'roofSlate',
+          'brickRedPlain',
+          '#ffffff',
+          false,
+          0.024
+        );
+        this.addBox(root, 0.14, 0.12, 0.12, 0, ySurf + 0.32, -0.41, '#9a3424');
+        this.addStationClockDial(root, 0, ySurf + 0.38, -0.345, 0.044, 1);
+      }
+
+      // =====================================================================
+      // 5. OUTER PLATFORM BENCHES, NAMEBOARDS, LAMPS & DISTRIBUTED WAITING CARGO
+      // =====================================================================
+      for (let l = 0; l < L; l++) {
+        const distFromMid = Math.abs(l - midX);
+        const clearOfHeadhouse = L >= 2 ? distFromMid > (L >= 4 ? 1.35 : 0.65) : false;
+        if (clearOfHeadhouse) {
+          this.addBox(root, 0.18, 0.038, 0.045, l - 0.18, ySurf, -0.415, '#78350f');
+          this.addStationNameboard(root, l + 0.18, ySurf, -0.42, ownerColor, 0.2);
+        }
+
+        // Outer Platform B lamps, nameboards & benches
+        this.addPlatformLamp(root, l, ySurf, outerBz + 0.045);
+        if (l % 2 === 0) {
+          this.addStationNameboard(root, l - 0.22, ySurf, outerBz + 0.045, ownerColor, 0.2);
         } else {
-          // Wooden platform waiting benches + company station signboard + warm platform lamps
-          this.addBox(g, 0.18, 0.038, 0.045, -0.18, 0.1, -0.41, '#78350f');
-          this.addBox(g, 0.16, 0.045, 0.022, 0.18, 0.16, -0.42, ownerColor);
-          this.addBox(g, 0.015, 0.07, 0.015, 0.14, 0.1, -0.42, '#cbd5e1');
-          this.addBox(g, 0.015, 0.07, 0.015, 0.22, 0.1, -0.42, '#cbd5e1');
+          this.addBox(root, 0.18, 0.038, 0.045, l + 0.2, ySurf, outerBz + 0.04, '#78350f');
         }
-
-        // Warm glowing platform lamps on south platform
-        this.addCyl(g, 0.01, 0.19, 0, 0.1, 0.42, '#1e293b', undefined, true);
-        const lampOrb = new THREE.Mesh(
-          this.sphereGeo,
-          this.getMat('#fef08a', '#facc15', 0.55)
-        );
-        lampOrb.scale.set(0.042, 0.042, 0.042);
-        lampOrb.position.set(0, 0.3, 0.42);
-        g.add(lampOrb);
-
-        // 4. Dynamic Waiting Passengers (North Platform) & Freight Cargo (South Platform)!
-        this.populateWaitingCargo(
-          g,
-          { ...station.waitingCargo, MAIL: 0, COAL: 0, WOOD: 0, GRAIN: 0, FOOD: 0, GOODS: 0 },
-          -0.42,
-          0.42,
-          0.1,
-          -0.31,
-          0.03,
-          i,
-          tiles.length
-        );
-        this.populateWaitingCargo(
-          g,
-          { ...station.waitingCargo, PASSENGERS: 0 },
-          -0.42,
-          0.42,
-          0.1,
-          0.34,
-          0.03,
-          i,
-          tiles.length
-        );
-
-        this.buildingsGroup.add(g);
       }
+
+      // Distribute waiting passengers & freight cargo across Outer Platform A, Island Platforms, and Outer Platform B!
+      const paxStripsZ: number[] = [-0.31];
+      const freightStripsZ: number[] = [outerBz - 0.02];
+      for (let s = 0; s < T - 1; s++) {
+        paxStripsZ.push(s + 0.5);
+        freightStripsZ.push(s + 0.5);
+      }
+
+      const paxOnlyCargo: Record<CargoType, number> = {
+        ...station.waitingCargo,
+        MAIL: 0,
+        COAL: 0,
+        WOOD: 0,
+        GRAIN: 0,
+        FOOD: 0,
+        GOODS: 0,
+      };
+      const freightOnlyCargo: Record<CargoType, number> = {
+        ...station.waitingCargo,
+        PASSENGERS: 0,
+      };
+
+      const totalPaxSlots = paxStripsZ.length * L;
+      let paxSlot = 0;
+      for (let sIdx = 0; sIdx < paxStripsZ.length; sIdx++) {
+        const stripZ = paxStripsZ[sIdx];
+        const spreadZ = sIdx === 0 ? 0.024 : 0.095;
+        for (let l = 0; l < L; l++) {
+          this.populateWaitingCargo(
+            root,
+            paxOnlyCargo,
+            l - 0.4,
+            l + 0.4,
+            ySurf,
+            stripZ,
+            spreadZ,
+            paxSlot,
+            totalPaxSlots
+          );
+          paxSlot++;
+        }
+      }
+
+      const totalFreightSlots = freightStripsZ.length * L;
+      let freightSlot = 0;
+      for (let sIdx = 0; sIdx < freightStripsZ.length; sIdx++) {
+        const stripZ = freightStripsZ[sIdx];
+        const zOff = sIdx === 0 ? stripZ : stripZ + 0.08;
+        for (let l = 0; l < L; l++) {
+          this.populateWaitingCargo(
+            root,
+            freightOnlyCargo,
+            l - 0.38,
+            l + 0.38,
+            ySurf,
+            zOff,
+            0.025,
+            freightSlot,
+            totalFreightSlots
+          );
+          freightSlot++;
+        }
+      }
+
+      this.buildingsGroup.add(root);
     } else if (station.kind === 'BUS_STOP') {
       const t0 = tiles[0];
       const corners = getTileCornerHeights(state, t0.x, t0.y);
@@ -2536,6 +2971,52 @@ export class StructuresRenderer {
     }
   }
 
+  private collectAllStations(state: GameState): Station[] {
+    const extraRemote = (state as GameState & { remoteStations?: Station[] }).remoteStations;
+    const hasPeers = Boolean(state.remotePlayers && state.remotePlayers.length > 0);
+    const hasExtra = Boolean(extraRemote && extraRemote.length > 0);
+    if (!hasPeers && !hasExtra) {
+      return state.stations;
+    }
+
+    const seen = new Set<string>();
+    const combined: Station[] = [];
+    for (let i = 0; i < state.stations.length; i++) {
+      const st = state.stations[i];
+      seen.add(st.id);
+      combined.push(st);
+    }
+
+    if (extraRemote) {
+      for (let i = 0; i < extraRemote.length; i++) {
+        const rst = extraRemote[i];
+        if (rst && rst.id && !seen.has(rst.id)) {
+          seen.add(rst.id);
+          combined.push(rst);
+        }
+      }
+    }
+
+    if (state.remotePlayers) {
+      for (let p = 0; p < state.remotePlayers.length; p++) {
+        const peer = state.remotePlayers[p];
+        if (!peer?.stations) continue;
+        for (let j = 0; j < peer.stations.length; j++) {
+          const rst = peer.stations[j];
+          if (rst && rst.id && !seen.has(rst.id)) {
+            seen.add(rst.id);
+            combined.push({
+              ...rst,
+              ownerId: rst.ownerId || peer.clientId,
+            });
+          }
+        }
+      }
+    }
+
+    return combined;
+  }
+
   private computeStructuresSig(state: GameState): string {
     let tileHash = 2166136261 >>> 0;
     const tiles = state.tiles;
@@ -2549,16 +3030,36 @@ export class StructuresRenderer {
       if (t.hqOwnerId) code |= 1024;
       if (t.road) code |= 2048;
       if (t.rail) code |= 4096;
+      if (t.stationAxis === 'X') code |= 8192;
+      else if (t.stationAxis === 'Y') code |= 16384;
       tileHash ^= (i * 31 + code) >>> 0;
       tileHash = Math.imul(tileHash, 16777619) >>> 0;
     }
 
+    const allStations = this.collectAllStations(state);
     let stationCargoHash = 2166136261 >>> 0;
-    for (let i = 0; i < state.stations.length; i++) {
-      const st = state.stations[i];
-      const w = st.waitingCargo;
-      stationCargoHash ^= st.tiles.length;
+    for (let i = 0; i < allStations.length; i++) {
+      const st = allStations[i];
+      const stTiles = st.tiles && st.tiles.length > 0 ? st.tiles : [{ x: st.x, y: st.y }];
+      const firstTile = stTiles[0];
+      const lastTile = stTiles[stTiles.length - 1];
+      const orientCode = st.orientation === 'Y' ? 2 : st.orientation === 'X' ? 1 : 0;
+      const tracksCode = st.tracks ?? 0;
+      const lenCode = st.platformLength ?? 0;
+
+      stationCargoHash ^=
+        (stTiles.length ^
+          (orientCode << 6) ^
+          (tracksCode << 8) ^
+          (lenCode << 11) ^
+          (firstTile.x << 15) ^
+          (firstTile.y << 21) ^
+          (lastTile.x << 3) ^
+          (lastTile.y << 9)) >>>
+        0;
       stationCargoHash = Math.imul(stationCargoHash, 16777619) >>> 0;
+
+      const w = st.waitingCargo;
       if (w) {
         stationCargoHash ^=
           ((Math.round(w.PASSENGERS || 0) * 3) ^
@@ -2579,10 +3080,10 @@ export class StructuresRenderer {
     }
 
     const hqKey = state.corporate.hqTile
-      ? `${state.corporate.hqTile.x},${state.corporate.hqTile.y}:${state.corporate.hqTier}:${state.corporate.companyName}`
+      ? `${state.corporate.hqTile.x},${state.corporate.hqTile.y}:${state.corporate.hqTier}:${state.corporate.companyName}:${state.corporate.playerColor ?? ''}`
       : 'none';
 
-    return `${state.mapSize}:${state.networkRevision ?? 0}:${tileHash}:${state.stations.length}:${stationCargoHash}:${state.industries.length}:${townPopSig}:${hqKey}:${state.aiCompanies.length}`;
+    return `${state.mapSize}:${state.networkRevision ?? 0}:${tileHash}:${allStations.length}:${stationCargoHash}:${state.industries.length}:${townPopSig}:${hqKey}:${state.aiCompanies.length}:${state.remotePlayers?.length ?? 0}`;
   }
 
   private computeSignalsLayoutSig(state: GameState): string {
@@ -2684,7 +3185,7 @@ export class StructuresRenderer {
       }
 
       if (tile.depot === 'ROAD' || tile.depot === 'RAIL') {
-        const ownerColor = resolveOwnerColor(tile.ownerId, state.aiCompanies);
+        const ownerColor = resolveOwnerColor(tile.ownerId, state.aiCompanies, state);
         this.buildDepot(tile, tile.depot, ownerColor, state);
       }
     }
@@ -2694,19 +3195,31 @@ export class StructuresRenderer {
       this.buildIndustry(state.industries[i], state);
     }
 
-    // 3. Stations
-    for (let i = 0; i < state.stations.length; i++) {
-      const st = state.stations[i];
-      const ownerColor = resolveOwnerColor(st.ownerId, state.aiCompanies);
+    // 3. Stations (local + remote multiplayer snapshots)
+    const allStations = this.collectAllStations(state);
+    for (let i = 0; i < allStations.length; i++) {
+      const st = allStations[i];
+      const ownerColor = resolveOwnerColor(st.ownerId, state.aiCompanies, state);
       this.buildStation(st, ownerColor, state);
     }
 
-    // 4. Player HQ (5 Distinct OpenTTD Showpiece Tiers)
+    // 4. Player HQ & Remote Multiplayer HQs (5 Distinct OpenTTD Showpiece Tiers)
     if (state.corporate.hqTile && state.corporate.hqTier > 0) {
       const hx = state.corporate.hqTile.x;
       const hy = state.corporate.hqTile.y;
       const corners = getTileCornerHeights(state, hx, hy);
-      this.buildHQ(hx, hy, corners.minY, corners.maxY, state.corporate.hqTier, '#2563eb');
+      const playerColor = resolveOwnerColor('player', state.aiCompanies, state);
+      this.buildHQ(hx, hy, corners.minY, corners.maxY, state.corporate.hqTier, playerColor);
+    }
+    if (state.remotePlayers) {
+      for (let p = 0; p < state.remotePlayers.length; p++) {
+        const peer = state.remotePlayers[p];
+        if (peer?.hqTile && peer.hqTier > 0) {
+          const corners = getTileCornerHeights(state, peer.hqTile.x, peer.hqTile.y);
+          const peerColor = peer.color || resolveOwnerColor(peer.clientId, state.aiCompanies, state);
+          this.buildHQ(peer.hqTile.x, peer.hqTile.y, corners.minY, corners.maxY, peer.hqTier, peerColor);
+        }
+      }
     }
   }
 
@@ -2798,12 +3311,23 @@ export class StructuresRenderer {
       rec.el.textContent = ind.name || INDUSTRY_TYPE_NO[ind.type];
     }
 
-    // 3. Classic TTD Company-Colored Station Signs
-    for (const st of state.stations) {
+    // 3. Classic TTD Company-Colored Station Signs (centered over multi-track / multi-length footprint)
+    const allStations = this.collectAllStations(state);
+    for (const st of allStations) {
       const id = `st:${st.id}`;
       activeIds.add(id);
-      const wy = getSurfaceHeightAt(state, st.x, st.y) + 0.78;
-      const ownerColor = resolveOwnerColor(st.ownerId, state.aiCompanies);
+
+      let wx = st.x;
+      let wz = st.y;
+      let wy = getSurfaceHeightAt(state, st.x, st.y) + 0.78;
+      if (st.kind === 'TRAIN_STATION') {
+        const layout = this.resolveTrainStationLayout(st, state);
+        wx = layout.centerX;
+        wz = layout.centerZ;
+        wy = layout.maxCornerY + (layout.platformLength >= 2 ? 0.96 : 0.78);
+      }
+
+      const ownerColor = resolveOwnerColor(st.ownerId, state.aiCompanies, state);
       const waiting = sumWaitingCargo(st.waitingCargo);
 
       let rec = this.labels.get(id);
@@ -2822,12 +3346,12 @@ export class StructuresRenderer {
           this.onStationBadgeClick?.(stId);
         });
         this.labelLayer.appendChild(el);
-        rec = { id, kind: 'station', wx: st.x, wy, wz: st.y, el, stationId: st.id };
+        rec = { id, kind: 'station', wx, wy, wz, el, stationId: st.id };
         this.labels.set(id, rec);
       }
-      rec.wx = st.x;
+      rec.wx = wx;
       rec.wy = wy;
-      rec.wz = st.y;
+      rec.wz = wz;
       rec.el.style.background = ownerColor;
       rec.el.textContent = waiting > 0 ? `${st.name} [${waiting}]` : st.name;
     }

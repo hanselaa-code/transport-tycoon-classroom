@@ -14,6 +14,9 @@ Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / Open
 - **Detaljert OpenTTD / OpenGFX 3D Isometrisk Grafikk** (`Three.js` `OrthographicCamera` + `PCFSoftShadowMap`):
   - Kontinuerlig vanntett terrengmesh med prosedyrisk pikselkunst (`NearestFilter`), steinete klippeskråninger, bølgeteksturer med brenning langs kysten, flersjikts bartrær/løvtrær, planoverganger med blinkende varsellys, buede jernbaneskinner og isometriske solskygger.
   - **15 bybygnings-arketyper (Nivå 1–3)** med saltak, valmtak og mansardtak, samt **6 animerte industrianlegg** og **detaljerte norske lokomotiver (*NSB Type 26*, *Di 3 Nohab*, *El 18*), vogner og lastebiler**.
+- **OpenTTD Stasjonsbygger (1–4 spor × 1–6 lengde), Nedslagsfelt-grid & Tog-innkjøring**:
+  - Visuelt blått **nedslagsfelt-grid** rundt stasjoner både under bygging og ved inspeksjon, fritt valg av stasjonsretning (`NØ–SV` / `NV–SØ`, hurtigtast `[R]`), antall parallelle spor (`1–4`) og plattformlengde (`1–6`).
+  - Hele toget kjører helt frem til enden av plattformen ved stopp, og for korte plattformer gir autentisk OpenTTD-tidsstraff ved av- og pålasting.
 - **Autentisk OpenTTD Depot, Separat Lokomotiv-/Vognkjøp & Vognbytte**:
   - Lokomotiver og alle 7 spesialvogner (*Passasjervogn*, *Postvogn*, *Kullvogn*, *Tømmervogn*, *Gods-/Containervogn*, *Kornvogn*, *Kjølevogn*) kjøpes separat med sideprofil-ikoner — sett sammen egne eller blandede togsett (f.eks. `Passasjervogn + Postvogn`) via dra-og-slipp på depotsporene og sidesporet!
   - Eksisterende tog kan kalles inn med **`Send til depot`** for å koble av/selge/bytte vogner til nye oppdrag, og lastebiler kan bygges om i garasjen (`5 000 kr`).
@@ -26,7 +29,7 @@ Et norsk undervisningsspill inspirert av **Transport Tycoon Deluxe (1995) / Open
 ```bash
 npm install
 npm run dev      # Start lokal utviklingsserver (Vite)
-npm run verify   # Kjør hodeløs simulerings-, bru-, depot-, flerspiller- og 3D-verifisering (43 017 sjekker)
+npm run verify   # Kjør hodeløs simulerings-, bru-, stasjons-, depot-, flerspiller- og 3D-verifisering (43 198 sjekker)
 npm run build    # TypeScript-sjekk og produksjonsbygg (tsc -b && vite build)
 ```
 

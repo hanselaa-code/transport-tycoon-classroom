@@ -8,9 +8,19 @@ import {
   CheckCircle2,
   Users,
   Info,
+  Grid3x3,
+  AlertTriangle,
 } from 'lucide-react';
 import type { CargoType, GameState, StationKind } from '../../types/game';
-import type { GameEngine } from '../../core';
+import {
+  getEffectiveStationPlatformLength,
+  getEffectiveStationTracks,
+  getTrainRequiredPlatformTiles,
+  MAX_TRAIN_WAGONS,
+  RAIL_STATION_CATCHMENT_RADIUS,
+  ROAD_STATION_CATCHMENT_RADIUS,
+  type GameEngine,
+} from '../../core';
 import {
   CARGO_COLORS,
   CARGO_LABELS_NO,
@@ -19,15 +29,18 @@ import {
   STATION_KIND_LABELS_NO,
   VEHICLE_STATE_LABELS_NO,
 } from '../formatters';
+import { resolveTrainWagonsList } from '../VehicleSprites';
 import { TTDWindow } from '../TTDWindow';
 
 export interface StationDetailWindowProps {
   engine: GameEngine;
   state: GameState;
   stationId: string;
+  showCatchmentGrid: boolean;
   zIndex: number;
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
+  onToggleCatchmentGrid: () => void;
   onFocusTile: (x: number, y: number) => void;
   onInspectVehicle: (vehicleId: string) => void;
 }
@@ -124,9 +137,11 @@ export const StationDetailWindow: React.FC<StationDetailWindowProps> = ({
   engine,
   state: _state,
   stationId,
+  showCatchmentGrid,
   zIndex,
   onFocus,
   onClose,
+  onToggleCatchmentGrid,
   onFocusTile,
   onInspectVehicle,
 }) => {
@@ -164,6 +179,33 @@ export const StationDetailWindow: React.FC<StationDetailWindowProps> = ({
     hqBonusPct,
   } = details;
 
+  const isRailStation = station.kind === 'TRAIN_STATION';
+  const stationTracks = getEffectiveStationTracks(station);
+  const platformLen = getEffectiveStationPlatformLength(station);
+  const orientationLabel =
+    (station.orientation ?? 'X') === 'Y' ? 'Retning NV–SØ' : 'Retning NØ–SV';
+  const maxPenaltyFreeWagons = Math.min(MAX_TRAIN_WAGONS, platformLen * 2 - 1);
+  const catchmentRadius = isRailStation
+    ? RAIL_STATION_CATCHMENT_RADIUS
+    : ROAD_STATION_CATCHMENT_RADIUS;
+
+  // Detect any routed trains that exceed this station's platformLength
+  const oversizedTrains = isRailStation
+    ? servicingVehicles
+        .filter((v) => v.network === 'RAIL')
+        .map((v) => {
+          const wagonCount = resolveTrainWagonsList(v).length;
+          const requiredTiles = getTrainRequiredPlatformTiles(wagonCount);
+          return {
+            vehicle: v,
+            wagonCount,
+            requiredTiles,
+            overhang: Math.max(0, requiredTiles - platformLen),
+          };
+        })
+        .filter((item) => item.overhang > 0)
+    : [];
+
   // Show ONLY cargos with waiting > 0 or in suppliedCargos (never spam 0 tonn irrelevant cargos!)
   const visibleWaitingCargos = ALL_CARGOS.filter(
     (c) =>
@@ -179,50 +221,115 @@ export const StationDetailWindow: React.FC<StationDetailWindowProps> = ({
       theme={isPlayerOwned ? 'teal' : 'purple'}
       defaultX={185}
       defaultY={54}
-      width={510}
+      width={520}
       zIndex={zIndex}
       onFocus={onFocus}
       onClose={onClose}
     >
-      {/* Top Company Owner Header Badge */}
-      <div className="ttd-panel p-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <span
-            className="w-3.5 h-7 shrink-0 border border-black/60"
-            style={{ backgroundColor: ownerColor }}
-          />
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="font-bold text-amber-100 text-xs truncate">
-                {ownerName}
-              </span>
-              {isPlayerOwned ? (
-                <span className="px-1.5 py-0.2 bg-emerald-950/90 border border-emerald-600/70 text-emerald-300 text-[10px] font-bold">
-                  Ditt selskap
+      {/* Top Company Owner + Layout Badge + Catchment Grid Toggle */}
+      <div className="ttd-panel p-2 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              className="w-3.5 h-7 shrink-0 border border-black/60"
+              style={{ backgroundColor: ownerColor }}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-bold text-amber-100 text-xs truncate">
+                  {ownerName}
                 </span>
-              ) : (
-                <span className="px-1.5 py-0.2 bg-purple-950/90 border border-purple-500/70 text-purple-200 text-[10px] font-bold">
-                  Konkurrent
-                </span>
-              )}
-            </div>
-            <div className="text-[10px] text-slate-300 ttd-num">
-              {STATION_KIND_LABELS_NO[station.kind]} • {station.tiles.length}{' '}
-              {station.tiles.length === 1 ? 'rute' : 'ruter'} • Posisjon (
-              {station.x}, {station.y})
+                {isPlayerOwned ? (
+                  <span className="px-1.5 py-0.2 bg-emerald-950/90 border border-emerald-600/70 text-emerald-300 text-[10px] font-bold">
+                    Ditt selskap
+                  </span>
+                ) : (
+                  <span className="px-1.5 py-0.2 bg-purple-950/90 border border-purple-500/70 text-purple-200 text-[10px] font-bold">
+                    Konkurrent
+                  </span>
+                )}
+              </div>
+              <div className="text-[10px] text-slate-300 ttd-num">
+                {isRailStation ? (
+                  <>
+                    <strong className="text-sky-300">
+                      {stationTracks} spor × {platformLen}{' '}
+                      {platformLen === 1 ? 'rute' : 'ruter'}
+                    </strong>{' '}
+                    • {orientationLabel} • Maks uten tidsstraff:{' '}
+                    <strong className="text-emerald-300">
+                      opptil {maxPenaltyFreeWagons}{' '}
+                      {maxPenaltyFreeWagons === 1 ? 'vogn' : 'vogner'}
+                    </strong>
+                  </>
+                ) : (
+                  <>
+                    {STATION_KIND_LABELS_NO[station.kind]} • Posisjon (
+                    {station.x}, {station.y}) • Nedslagsfelt {catchmentRadius}{' '}
+                    ruter
+                  </>
+                )}
+              </div>
             </div>
           </div>
+
+          <button
+            type="button"
+            onClick={() => onFocusTile(station.x, station.y)}
+            className="ttd-btn !px-2.5 !py-1 shrink-0"
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            <span>Sentrer kamera</span>
+          </button>
         </div>
 
+        {/* Prominent OpenTTD Catchment Area Grid Toggle */}
         <button
           type="button"
-          onClick={() => onFocusTile(station.x, station.y)}
-          className="ttd-btn !px-2.5 !py-1 shrink-0"
+          onClick={onToggleCatchmentGrid}
+          className={`ttd-btn w-full !py-1.5 !justify-between ${
+            showCatchmentGrid ? 'ttd-btn-active' : 'ttd-btn-teal'
+          }`}
+          title="Vis eller skjul det blå nedslagsfelt-gridet rundt stasjonen på 3D-kartet"
         >
-          <Crosshair className="w-3.5 h-3.5" />
-          <span>Sentrer kamera</span>
+          <span className="flex items-center gap-1.5">
+            <Grid3x3 className="w-3.5 h-3.5 text-sky-300" />
+            <span>
+              Nedslagsfelt-grid på kartet ({catchmentRadius} ruter rundt stasjonen):
+            </span>
+          </span>
+          <strong
+            className={
+              showCatchmentGrid ? 'text-amber-200' : 'text-slate-300'
+            }
+          >
+            {showCatchmentGrid ? 'PÅ (Vises i blått)' : 'AV'}
+          </strong>
         </button>
       </div>
+
+      {/* Amber Warning Banner if any routed train exceeds platformLength */}
+      {oversizedTrains.length > 0 && (
+        <div className="ttd-inset p-2 bg-amber-950/60 border border-amber-500/70 space-y-1">
+          {oversizedTrains.map(({ vehicle, requiredTiles }) => (
+            <div
+              key={vehicle.id}
+              onClick={() => onInspectVehicle(vehicle.id)}
+              className="flex items-start gap-1.5 text-[11px] text-amber-200 cursor-pointer hover:underline"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>{vehicle.name}</strong> krever{' '}
+                <strong>{requiredTiles} ruter</strong>, men plattformen er{' '}
+                <strong>
+                  {platformLen} {platformLen === 1 ? 'rute' : 'ruter'}
+                </strong>{' '}
+                — gir tidsstraff ved av- og pålasting!
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Section 1: Waiting Cargo & Accepted Deliveries */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -379,34 +486,53 @@ export const StationDetailWindow: React.FC<StationDetailWindowProps> = ({
           </div>
         ) : (
           <div className="ttd-inset divide-y divide-slate-800 max-h-36 overflow-y-auto">
-            {servicingVehicles.map((v) => (
-              <div
-                key={v.id}
-                onClick={() => onInspectVehicle(v.id)}
-                className="px-2 py-1.5 flex items-center justify-between gap-2 hover:bg-slate-800/70 cursor-pointer text-[11px] ttd-num"
-              >
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {v.network === 'RAIL' ? (
-                    <TrainFront className="w-3.5 h-3.5 text-sky-300 shrink-0" />
-                  ) : (
-                    <Truck className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                  )}
-                  <span className="font-bold text-amber-100 truncate">
-                    {v.name}
-                  </span>
-                </div>
+            {servicingVehicles.map((v) => {
+              const reqTiles =
+                v.network === 'RAIL'
+                  ? getTrainRequiredPlatformTiles(
+                      resolveTrainWagonsList(v).length
+                    )
+                  : 1;
+              const isTooLong = isRailStation && reqTiles > platformLen;
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-slate-300">
-                    {formatNumber(v.cargoAmount)}/{formatNumber(v.capacity)}{' '}
-                    {CARGO_UNITS_NO[v.cargoType]} {CARGO_LABELS_NO[v.cargoType]}
-                  </span>
-                  <span className="text-emerald-300 font-semibold">
-                    {VEHICLE_STATE_LABELS_NO[v.state]}
-                  </span>
+              return (
+                <div
+                  key={v.id}
+                  onClick={() => onInspectVehicle(v.id)}
+                  className="px-2 py-1.5 flex items-center justify-between gap-2 hover:bg-slate-800/70 cursor-pointer text-[11px] ttd-num"
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {v.network === 'RAIL' ? (
+                      <TrainFront className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+                    ) : (
+                      <Truck className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                    )}
+                    <span className="font-bold text-amber-100 truncate">
+                      {v.name}
+                    </span>
+                    {isTooLong && (
+                      <span
+                        title={`Krever ${reqTiles} ruter, plattform er ${platformLen} ruter`}
+                        className="px-1 py-0.2 bg-amber-950 border border-amber-500/70 text-amber-300 text-[9px] font-bold shrink-0"
+                      >
+                        ⚠️ {reqTiles} ruter
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-slate-300">
+                      {formatNumber(v.cargoAmount)}/{formatNumber(v.capacity)}{' '}
+                      {CARGO_UNITS_NO[v.cargoType]}{' '}
+                      {CARGO_LABELS_NO[v.cargoType]}
+                    </span>
+                    <span className="text-emerald-300 font-semibold">
+                      {VEHICLE_STATE_LABELS_NO[v.state]}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -462,6 +462,12 @@ export interface PickedTileResult {
   tile: Tile;
 }
 
+export interface StationOverlayData {
+  mode: 'BUILD_PREVIEW' | 'INSPECT_EXISTING';
+  footprintTiles: Array<{ x: number; y: number; valid: boolean }>;
+  catchmentTiles: Array<{ x: number; y: number }>;
+}
+
 export class IsoSceneManager {
   public readonly scene: THREE.Scene;
   public readonly camera: THREE.OrthographicCamera;
@@ -512,6 +518,18 @@ export class IsoSceneManager {
   private dragOutlinePositions: Float32Array;
   private dragOutlineColors: Float32Array;
   private dragOutlineLines: THREE.LineSegments;
+
+  // OpenTTD Station Catchment Grid Overlay (up to 384 sloped tiles + crisp borders)
+  private readonly maxCatchmentInstances = 384;
+  private catchmentFillGeo: THREE.BufferGeometry;
+  private catchmentFillPositions: Float32Array;
+  private catchmentFillColors: Float32Array;
+  private catchmentFillMesh: THREE.Mesh;
+
+  private catchmentOutlineGeo: THREE.BufferGeometry;
+  private catchmentOutlinePositions: Float32Array;
+  private catchmentOutlineColors: Float32Array;
+  private catchmentOutlineLines: THREE.LineSegments;
 
   // Scratch math objects to avoid GC pressure at 60 FPS
   private readonly raycaster = new THREE.Raycaster();
@@ -639,7 +657,58 @@ export class IsoSceneManager {
     this.dragOutlineLines.frustumCulled = false;
     this.dragOutlineLines.renderOrder = 27;
 
+    // 3. Sloped OpenTTD Station Catchment Grid Quads + Per-Tile Grid Outlines
+    this.catchmentFillPositions = new Float32Array(this.maxCatchmentInstances * 6 * 3);
+    this.catchmentFillColors = new Float32Array(this.maxCatchmentInstances * 6 * 3);
+    this.catchmentFillGeo = new THREE.BufferGeometry();
+    this.catchmentFillGeo.setAttribute(
+      'position',
+      new THREE.BufferAttribute(this.catchmentFillPositions, 3)
+    );
+    this.catchmentFillGeo.setAttribute(
+      'color',
+      new THREE.BufferAttribute(this.catchmentFillColors, 3)
+    );
+    this.catchmentFillGeo.setDrawRange(0, 0);
+    const catchmentFillMat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.24,
+      depthWrite: false,
+    });
+    this.catchmentFillMesh = new THREE.Mesh(this.catchmentFillGeo, catchmentFillMat);
+    this.catchmentFillMesh.frustumCulled = false;
+    this.catchmentFillMesh.renderOrder = 21;
+
+    this.catchmentOutlinePositions = new Float32Array(this.maxCatchmentInstances * 8 * 3);
+    this.catchmentOutlineColors = new Float32Array(this.maxCatchmentInstances * 8 * 3);
+    this.catchmentOutlineGeo = new THREE.BufferGeometry();
+    this.catchmentOutlineGeo.setAttribute(
+      'position',
+      new THREE.BufferAttribute(this.catchmentOutlinePositions, 3)
+    );
+    this.catchmentOutlineGeo.setAttribute(
+      'color',
+      new THREE.BufferAttribute(this.catchmentOutlineColors, 3)
+    );
+    this.catchmentOutlineGeo.setDrawRange(0, 0);
+    const catchmentOutlineMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+    });
+    this.catchmentOutlineLines = new THREE.LineSegments(
+      this.catchmentOutlineGeo,
+      catchmentOutlineMat
+    );
+    this.catchmentOutlineLines.frustumCulled = false;
+    this.catchmentOutlineLines.renderOrder = 25;
+
     this.previewGroup.add(
+      this.catchmentFillMesh,
+      this.catchmentOutlineLines,
       this.cursorFillMesh,
       this.cursorOutlineLoop,
       this.dragFillMesh,
@@ -1142,14 +1211,238 @@ export class IsoSceneManager {
     lineOut[li++] = x0; lineOut[li++] = yNW + olLift; lineOut[li++] = z0;
   }
 
+  public updateStationCatchmentOverlay(
+    overlay: StationOverlayData | null,
+    state: GameState,
+    timeSec: number
+  ): void {
+    if (!overlay || (overlay.catchmentTiles.length === 0 && overlay.footprintTiles.length === 0)) {
+      this.catchmentFillGeo.setDrawRange(0, 0);
+      this.catchmentOutlineGeo.setDrawRange(0, 0);
+      return;
+    }
+
+    const footprintSet = new Set<number>();
+    for (let i = 0; i < overlay.footprintTiles.length; i++) {
+      const fp = overlay.footprintTiles[i];
+      if (fp.x >= 0 && fp.y >= 0 && fp.x < state.mapSize && fp.y < state.mapSize) {
+        footprintSet.add(fp.y * state.mapSize + fp.x);
+      }
+    }
+
+    const isBuildMode = overlay.mode === 'BUILD_PREVIEW';
+    const pulse = isBuildMode
+      ? 0.88 + 0.12 * Math.sin(timeSec * 5.2)
+      : 0.78 + 0.22 * Math.sin(timeSec * 3.6);
+
+    const fillMat = this.catchmentFillMesh.material as THREE.MeshBasicMaterial;
+    const outlineMat = this.catchmentOutlineLines.material as THREE.LineBasicMaterial;
+    fillMat.opacity = isBuildMode ? 0.25 : 0.19;
+    outlineMat.opacity = isBuildMode ? 0.92 : 0.85;
+
+    let writeIdx = 0;
+
+    // In INSPECT_EXISTING mode, also frame the station's own footprint tiles in sky-cyan so the boundary is clear
+    if (!isBuildMode) {
+      for (let i = 0; i < overlay.footprintTiles.length; i++) {
+        if (writeIdx >= this.maxCatchmentInstances) break;
+        const fp = overlay.footprintTiles[i];
+        if (fp.x < 0 || fp.y < 0 || fp.x >= state.mapSize || fp.y >= state.mapSize) continue;
+        const qt = getTileAt(state, fp.x, fp.y);
+        const flatY =
+          qt && (qt.bridge === 'ROAD' || qt.bridge === 'RAIL')
+            ? getBridgeDeckY(state, qt)
+            : undefined;
+
+        this.writeSlopedTileQuadAndOutline(
+          state,
+          fp.x,
+          fp.y,
+          0.02,
+          0.035,
+          this.catchmentFillPositions,
+          writeIdx * 18,
+          this.catchmentOutlinePositions,
+          writeIdx * 24,
+          flatY
+        );
+
+        this.tmpColor.set('#0284c7').multiplyScalar(pulse * 0.85);
+        for (let v = 0; v < 6; v++) {
+          const ci = writeIdx * 18 + v * 3;
+          this.catchmentFillColors[ci] = this.tmpColor.r;
+          this.catchmentFillColors[ci + 1] = this.tmpColor.g;
+          this.catchmentFillColors[ci + 2] = this.tmpColor.b;
+        }
+
+        this.tmpColor.set('#38bdf8').multiplyScalar(pulse);
+        for (let v = 0; v < 8; v++) {
+          const ci = writeIdx * 24 + v * 3;
+          this.catchmentOutlineColors[ci] = this.tmpColor.r;
+          this.catchmentOutlineColors[ci + 1] = this.tmpColor.g;
+          this.catchmentOutlineColors[ci + 2] = this.tmpColor.b;
+        }
+        writeIdx++;
+      }
+    }
+
+    for (let i = 0; i < overlay.catchmentTiles.length; i++) {
+      if (writeIdx >= this.maxCatchmentInstances) break;
+      const ct = overlay.catchmentTiles[i];
+      if (ct.x < 0 || ct.y < 0 || ct.x >= state.mapSize || ct.y >= state.mapSize) continue;
+      if (footprintSet.has(ct.y * state.mapSize + ct.x)) continue;
+
+      const qt = getTileAt(state, ct.x, ct.y);
+      const flatY =
+        qt && (qt.bridge === 'ROAD' || qt.bridge === 'RAIL')
+          ? getBridgeDeckY(state, qt)
+          : undefined;
+
+      this.writeSlopedTileQuadAndOutline(
+        state,
+        ct.x,
+        ct.y,
+        0.015,
+        0.031,
+        this.catchmentFillPositions,
+        writeIdx * 18,
+        this.catchmentOutlinePositions,
+        writeIdx * 24,
+        flatY
+      );
+
+      const hasCoverageTarget = Boolean(
+        qt && (qt.industryId || (qt.buildingTier ?? 0) > 0)
+      );
+      const checker = (ct.x + ct.y) & 1;
+      const fillHex = hasCoverageTarget
+        ? '#3b82f6'
+        : checker === 0
+        ? '#2563eb'
+        : '#3b82f6';
+      const lineHex = hasCoverageTarget
+        ? '#93c5fd'
+        : checker === 0
+        ? '#60a5fa'
+        : '#818cf8';
+
+      this.tmpColor.set(fillHex).multiplyScalar(pulse);
+      for (let v = 0; v < 6; v++) {
+        const ci = writeIdx * 18 + v * 3;
+        this.catchmentFillColors[ci] = this.tmpColor.r;
+        this.catchmentFillColors[ci + 1] = this.tmpColor.g;
+        this.catchmentFillColors[ci + 2] = this.tmpColor.b;
+      }
+
+      this.tmpColor.set(lineHex).multiplyScalar(pulse);
+      for (let v = 0; v < 8; v++) {
+        const ci = writeIdx * 24 + v * 3;
+        this.catchmentOutlineColors[ci] = this.tmpColor.r;
+        this.catchmentOutlineColors[ci + 1] = this.tmpColor.g;
+        this.catchmentOutlineColors[ci + 2] = this.tmpColor.b;
+      }
+      writeIdx++;
+    }
+
+    this.catchmentFillGeo.setDrawRange(0, writeIdx * 6);
+    if (writeIdx > 0) {
+      this.catchmentFillGeo.attributes.position.needsUpdate = true;
+      this.catchmentFillGeo.attributes.color.needsUpdate = true;
+    }
+
+    this.catchmentOutlineGeo.setDrawRange(0, writeIdx * 8);
+    if (writeIdx > 0) {
+      this.catchmentOutlineGeo.attributes.position.needsUpdate = true;
+      this.catchmentOutlineGeo.attributes.color.needsUpdate = true;
+    }
+  }
+
   public updateHoverAndDragPreview(
     hoverTile: PickedTileResult | null,
     dragTiles: Array<{ x: number; y: number }> | null,
     activeTool: ToolType,
     isOrderPickerActive: boolean,
     state: GameState,
-    timeSec: number
+    timeSec: number,
+    stationOverlay?: StationOverlayData | null
   ): void {
+    this.updateStationCatchmentOverlay(stationOverlay ?? null, state, timeSec);
+
+    // 0. Mode A: Multi-tile Station Footprint Placement Preview (`TRAIN_STATION` / `BUS_STOP` / `TRUCK_BAY`)
+    if (
+      (!dragTiles || dragTiles.length === 0) &&
+      stationOverlay &&
+      stationOverlay.mode === 'BUILD_PREVIEW' &&
+      stationOverlay.footprintTiles.length > 0
+    ) {
+      this.cursorFillMesh.visible = false;
+      this.cursorOutlineLoop.visible = false;
+
+      const pulse = 0.88 + 0.12 * Math.sin(timeSec * 7.5);
+      let fpCount = 0;
+
+      for (let i = 0; i < stationOverlay.footprintTiles.length; i++) {
+        if (fpCount >= this.maxPreviewInstances) break;
+        const fp = stationOverlay.footprintTiles[i];
+        const clampedX = Math.max(0, Math.min(state.mapSize - 1, fp.x));
+        const clampedY = Math.max(0, Math.min(state.mapSize - 1, fp.y));
+        const inMap = fp.x >= 0 && fp.y >= 0 && fp.x < state.mapSize && fp.y < state.mapSize;
+        if (!inMap) continue;
+
+        const qt = getTileAt(state, clampedX, clampedY);
+        const flatY =
+          qt && (qt.bridge === 'ROAD' || qt.bridge === 'RAIL')
+            ? getBridgeDeckY(state, qt)
+            : undefined;
+
+        this.writeSlopedTileQuadAndOutline(
+          state,
+          clampedX,
+          clampedY,
+          0.022,
+          0.044,
+          this.dragFillPositions,
+          fpCount * 18,
+          this.dragOutlinePositions,
+          fpCount * 24,
+          flatY
+        );
+
+        const fillHex = fp.valid ? '#6ee7b7' : '#ef4444';
+        const borderHex = fp.valid ? '#ffffff' : '#fca5a5';
+
+        this.tmpColor.set(fillHex).multiplyScalar(pulse);
+        for (let v = 0; v < 6; v++) {
+          const ci = fpCount * 18 + v * 3;
+          this.dragFillColors[ci] = this.tmpColor.r;
+          this.dragFillColors[ci + 1] = this.tmpColor.g;
+          this.dragFillColors[ci + 2] = this.tmpColor.b;
+        }
+
+        this.tmpColor.set(borderHex);
+        for (let v = 0; v < 8; v++) {
+          const ci = fpCount * 24 + v * 3;
+          this.dragOutlineColors[ci] = this.tmpColor.r;
+          this.dragOutlineColors[ci + 1] = this.tmpColor.g;
+          this.dragOutlineColors[ci + 2] = this.tmpColor.b;
+        }
+        fpCount++;
+      }
+
+      this.dragFillGeo.setDrawRange(0, fpCount * 6);
+      if (fpCount > 0) {
+        this.dragFillGeo.attributes.position.needsUpdate = true;
+        this.dragFillGeo.attributes.color.needsUpdate = true;
+      }
+
+      this.dragOutlineGeo.setDrawRange(0, fpCount * 8);
+      if (fpCount > 0) {
+        this.dragOutlineGeo.attributes.position.needsUpdate = true;
+        this.dragOutlineGeo.attributes.color.needsUpdate = true;
+      }
+      return;
+    }
+
     // 1. Multi-tile sloped drag preview (ROAD / RAIL / ROAD_BRIDGE / RAIL_BRIDGE)
     if (dragTiles && dragTiles.length > 0) {
       this.cursorFillMesh.visible = false;
@@ -1327,6 +1620,10 @@ export class IsoSceneManager {
     (this.dragFillMesh.material as THREE.Material).dispose();
     this.dragOutlineGeo.dispose();
     (this.dragOutlineLines.material as THREE.Material).dispose();
+    this.catchmentFillGeo.dispose();
+    (this.catchmentFillMesh.material as THREE.Material).dispose();
+    this.catchmentOutlineGeo.dispose();
+    (this.catchmentOutlineLines.material as THREE.Material).dispose();
 
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {

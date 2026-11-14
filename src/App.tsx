@@ -138,7 +138,11 @@ export const App: React.FC = () => {
     x: number;
     y: number;
   } | null>(null);
-  const [stationLength, setStationLength] = useState<number>(2);
+  const [stationOrientation, setStationOrientation] = useState<'X' | 'Y'>('X');
+  const [stationTracks, setStationTracks] = useState<number>(1);
+  const [stationLength, setStationLength] = useState<number>(3);
+  const [showStationCatchment, setShowStationCatchment] =
+    useState<boolean>(true);
   const [selectedBridgeType, setSelectedBridgeType] =
     useState<BridgeType>('STEEL');
   const [pendingBridgeDrag, setPendingBridgeDrag] =
@@ -374,7 +378,20 @@ export const App: React.FC = () => {
     setIsQueryLandActive((prev) => !prev);
   }, []);
 
-  // Multi-tile train station, newly placed depot, and [?] Land Area Info helper
+  const handleRotateStationOrientation = useCallback(() => {
+    setStationOrientation((prev) => (prev === 'X' ? 'Y' : 'X'));
+  }, []);
+
+  const stationBuildConfig = useMemo(
+    () => ({
+      orientation: stationOrientation,
+      tracks: stationTracks,
+      length: stationLength,
+    }),
+    [stationOrientation, stationTracks, stationLength]
+  );
+
+  // Newly placed depot and [?] Land Area Info helper
   const handleTileInteract = useCallback(
     (x: number, y: number, tile: Tile) => {
       if (
@@ -389,25 +406,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (activeTool === 'TRAIN_STATION' && stationLength > 1) {
-        const curState = engine.getState();
-        const placed = curState.stations.find((st) =>
-          st.tiles.some((t) => t.x === x && t.y === y)
-        );
-        if (placed && placed.tiles.length < stationLength) {
-          const hasRailY =
-            curState.tiles.some(
-              (t) => t.x === x && (t.y === y - 1 || t.y === y + 1) && t.rail
-            ) &&
-            !curState.tiles.some(
-              (t) => t.y === y && (t.x === x - 1 || t.x === x + 1) && t.rail
-            );
-          for (let step = 1; step < stationLength; step++) {
-            const nx = hasRailY ? x : x + step;
-            const ny = hasRailY ? y + step : y;
-            engine.applyTool(nx, ny, 'TRAIN_STATION');
-          }
-        }
+      if (activeTool === 'TRAIN_STATION') {
         return;
       }
 
@@ -422,7 +421,7 @@ export const App: React.FC = () => {
         }
       }
     },
-    [activeTool, isQueryLandActive, stationLength, engine, openWindow]
+    [activeTool, isQueryLandActive, openWindow]
   );
 
   // Map entity click handlers
@@ -430,6 +429,7 @@ export const App: React.FC = () => {
     (stationId: string) => {
       setSelectedStationId(stationId);
       setHighlightedStationId(stationId);
+      setShowStationCatchment(true);
       openWindow('station_detail');
     },
     [openWindow]
@@ -879,6 +879,13 @@ export const App: React.FC = () => {
           state={state}
           activeTool={activeTool}
           selectedBridgeType={selectedBridgeType}
+          stationBuildConfig={stationBuildConfig}
+          onRotateStationOrientation={handleRotateStationOrientation}
+          inspectedStationId={
+            openWindows.has('station_detail') && showStationCatchment
+              ? selectedStationId
+              : null
+          }
           mapRotation={mapRotation}
           zoomCommand={zoomCommand}
           focusTile={focusTile}
@@ -943,12 +950,16 @@ export const App: React.FC = () => {
         <ConstructionPalette
           mode="RAIL"
           activeTool={activeTool}
+          stationOrientation={stationOrientation}
+          stationTracks={stationTracks}
           stationLength={stationLength}
           selectedBridgeType={selectedBridgeType}
           zIndex={getZIndex('rail_palette')}
           onFocus={bringToFront}
           onClose={closeWindow}
           onSelectTool={handleSelectTool}
+          onSetStationOrientation={setStationOrientation}
+          onSetStationTracks={setStationTracks}
           onSetStationLength={setStationLength}
           onSelectBridgeType={setSelectedBridgeType}
         />
@@ -958,12 +969,16 @@ export const App: React.FC = () => {
         <ConstructionPalette
           mode="ROAD"
           activeTool={activeTool}
+          stationOrientation={stationOrientation}
+          stationTracks={stationTracks}
           stationLength={stationLength}
           selectedBridgeType={selectedBridgeType}
           zIndex={getZIndex('road_palette')}
           onFocus={bringToFront}
           onClose={closeWindow}
           onSelectTool={handleSelectTool}
+          onSetStationOrientation={setStationOrientation}
+          onSetStationTracks={setStationTracks}
           onSetStationLength={setStationLength}
           onSelectBridgeType={setSelectedBridgeType}
         />
@@ -989,9 +1004,11 @@ export const App: React.FC = () => {
           engine={engine}
           state={state}
           stationId={selectedStationId}
+          showCatchmentGrid={showStationCatchment}
           zIndex={getZIndex('station_detail')}
           onFocus={bringToFront}
           onClose={closeWindow}
+          onToggleCatchmentGrid={() => setShowStationCatchment((s) => !s)}
           onFocusTile={handleFocusTile}
           onInspectVehicle={(vid) => {
             setSelectedVehicleId(vid);

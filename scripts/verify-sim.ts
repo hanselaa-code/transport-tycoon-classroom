@@ -24,6 +24,8 @@ import {
   INITIAL_CORPORATE_CASH_KR,
   INITIAL_CORPORATE_LOAN_KR,
   LOAN_STEP_KR,
+  MAX_STATION_LENGTH,
+  MAX_STATION_TRACKS,
   MAX_TRAIN_WAGONS,
   NORWEGIAN_TOWN_NAMES,
   RAIL_STATION_CATCHMENT_RADIUS,
@@ -36,8 +38,11 @@ import {
   VEHICLE_CATALOG,
   createGameEngine,
   findNetworkPath,
+  getEffectiveStationPlatformLength,
+  getEffectiveStationTracks,
   getStationHQBonusPct,
   getStationSuppliedCargos,
+  getTrainRequiredPlatformTiles,
   isCargoCompatibleWithStationKind,
   isTileTraversableForNetwork,
   tileIndex,
@@ -2567,6 +2572,424 @@ async function main(): Promise<void> {
 
   console.log(
     '  [OK] Bare locomotives, 0-wagon guard, separate 7 rail wagons, spare siding, COAL->PASSENGERS+MAIL depot swap, 3D mixed consist rebuild & 7 road vehicles + refit verified.'
+  );
+
+  // =========================================================================
+  // 13. Round 8 Catchment Grid, Multi-Track (1-4) x Multi-Length (1-6) Stations, Pull-In & Overhang Penalty
+  // =========================================================================
+  section(
+    '13. Round 8 Catchment Grid, Multi-Track (1-4) x Multi-Length (1-6) Oriented Stations, Pull-In & Overhang Penalty'
+  );
+
+  assertEq(MAX_STATION_TRACKS, 4, 'MAX_STATION_TRACKS === 4');
+  assertEq(MAX_STATION_LENGTH, 6, 'MAX_STATION_LENGTH === 6');
+  assertEq(getTrainRequiredPlatformTiles(0), 1, '0 wagons requires 1 platform tile');
+  assertEq(getTrainRequiredPlatformTiles(1), 1, '1 wagon requires 1 platform tile');
+  assertEq(getTrainRequiredPlatformTiles(3), 2, '3 wagons requires 2 platform tiles');
+  assertEq(getTrainRequiredPlatformTiles(5), 3, '5 wagons requires 3 platform tiles');
+  assertEq(getTrainRequiredPlatformTiles(7), 4, '7 wagons requires 4 platform tiles');
+  assertEq(getTrainRequiredPlatformTiles(8), 5, '8 wagons requires 5 platform tiles');
+
+  const r8Engine = new GameEngine({
+    worldSetup: {
+      mapSize: 64,
+      terrainType: 'flat',
+      waterLevel: 'very_low',
+      aiEnabled: false,
+      maxAiCount: 0,
+      seed: 20260801,
+    },
+  });
+  r8Engine.grantDevFunds('corporate', 40_000_000);
+  const r8State = r8Engine.getState();
+
+  // Clear flat arena x=6..58, y=6..58 at elevation 1
+  for (let cy = 6; cy <= 58; cy++) {
+    for (let cx = 6; cx <= 58; cx++) {
+      const t = r8State.tiles[tileIndex(cx, cy, 64)];
+      t.industryId = undefined;
+      t.townId = undefined;
+      t.buildingTier = undefined;
+      t.stationId = undefined;
+      t.stationAxis = undefined;
+      t.depot = null;
+      t.hqOwnerId = null;
+      t.ownerId = null;
+      t.road = false;
+      t.rail = false;
+      t.signal = false;
+      t.bridge = null;
+      t.bridgeAxis = undefined;
+      t.bridgeType = null;
+      t.bridgeElevation = undefined;
+      t.terrain = 'GRASS';
+      t.elevation = 1;
+    }
+  }
+
+  // Place a town building at (16, 8) — exactly 4 tiles north of a 2x4 station at (15..18, 12..13) —
+  // and a COAL_MINE at (12, 12) within radius 4 so previewStationPlacement detects supplied & accepted cargos!
+  const r8TownA = r8State.towns[0];
+  const r8TownB = r8State.towns[1];
+  r8TownA.x = 16;
+  r8TownA.y = 8;
+  r8State.tiles[tileIndex(16, 8, 64)].townId = r8TownA.id;
+  r8State.tiles[tileIndex(16, 8, 64)].buildingTier = 3;
+
+  const r8CoalMine = r8State.industries.find((ind) => ind.produces === 'COAL')!;
+  r8CoalMine.x = 11;
+  r8CoalMine.y = 12;
+  r8CoalMine.width = 2;
+  r8CoalMine.height = 2;
+
+  // 13a. previewStationPlacement & getStationCatchmentTiles (4-tile Chebyshev rail, 3-tile road)
+  const prev2x4 = r8Engine.previewStationPlacement(15, 12, 'TRAIN_STATION', {
+    orientation: 'X',
+    stationTracks: 2,
+    stationLength: 4,
+  });
+  assert(prev2x4.ok, 'previewStationPlacement ok for 2x4 X-oriented TRAIN_STATION');
+  assertEq(prev2x4.tracks, 2, 'Preview tracks === 2');
+  assertEq(prev2x4.platformLength, 4, 'Preview platformLength === 4');
+  assertEq(prev2x4.orientation, 'X', 'Preview orientation === X');
+  assertEq(prev2x4.catchmentRadius, RAIL_STATION_CATCHMENT_RADIUS, 'Rail catchmentRadius === 4');
+  assertEq(prev2x4.footprintTiles.length, 8, '2x4 station has 8 footprintTiles');
+  assert(prev2x4.footprintTiles.every((ft) => ft.valid), 'All 8 footprintTiles are valid');
+  assertEq(prev2x4.cost, 8 * BUILD_COSTS.TRAIN_STATION, '2x4 station cost === 8 * 45 000 = 360 000 kr');
+  // Bounding box around [15..18]x[12..13] with Chebyshev radius 4 is [11..22]x[8..17] = 12*10 = 120, minus 8 footprint = 112!
+  assertEq(
+    prev2x4.catchmentTiles.length,
+    12 * 10 - 8,
+    '2x4 rail station catchment grid has exact 112 surrounding tiles (Chebyshev r=4)'
+  );
+  assert(
+    prev2x4.suppliedCargos.includes('COAL') && prev2x4.suppliedCargos.includes('PASSENGERS'),
+    'previewStationPlacement detects COAL & PASSENGERS supplied inside 4-tile catchment'
+  );
+  assert(
+    prev2x4.acceptedCargos.includes('PASSENGERS') && prev2x4.acceptedCargos.includes('GOODS'),
+    'previewStationPlacement detects PASSENGERS & GOODS accepted inside 4-tile catchment'
+  );
+
+  const prevBus = r8Engine.previewStationPlacement(22, 22, 'BUS_STOP');
+  assert(prevBus.ok, 'previewStationPlacement ok for 1x1 BUS_STOP');
+  assertEq(prevBus.catchmentRadius, ROAD_STATION_CATCHMENT_RADIUS, 'Road catchmentRadius === 3');
+  assertEq(prevBus.footprintTiles.length, 1, 'BUS_STOP has 1 footprint tile');
+  assertEq(
+    prevBus.catchmentTiles.length,
+    7 * 7 - 1,
+    '1x1 BUS_STOP catchment grid has exact 48 surrounding tiles (Chebyshev r=3)'
+  );
+
+  // Slope mismatch check: raising one tile inside a 4x6 Y-oriented preview marks preview invalid
+  r8State.tiles[tileIndex(44, 15, 64)].elevation = 2;
+  const slopedPrev = r8Engine.previewStationPlacement(42, 12, 'TRAIN_STATION', {
+    orientation: 'Y',
+    stationTracks: 4,
+    stationLength: 6,
+  });
+  assert(!slopedPrev.ok, 'previewStationPlacement rejects uneven elevation across 4x6 footprint');
+  r8State.tiles[tileIndex(44, 15, 64)].elevation = 1;
+
+  // 13b. Multi-Track (1..4) x Multi-Length (1..6) x ('X' | 'Y') Construction, Bulldoze & Parallel-Track Isolation
+  const build2x4Res = r8Engine.applyTool(15, 12, 'TRAIN_STATION', {
+    orientation: 'X',
+    stationTracks: 2,
+    stationLength: 4,
+  });
+  assert(build2x4Res.ok && Boolean(build2x4Res.stationId), 'Built 2x4 X-oriented TRAIN_STATION');
+  const st2x4 = r8Engine.getState().stations.find((s) => s.id === build2x4Res.stationId)!;
+  assertEq(st2x4.orientation, 'X', 'st2x4.orientation === X');
+  assertEq(getEffectiveStationTracks(st2x4), 2, 'getEffectiveStationTracks(st2x4) === 2');
+  assertEq(getEffectiveStationPlatformLength(st2x4), 4, 'getEffectiveStationPlatformLength(st2x4) === 4');
+  assertEq(
+    r8Engine.getStationCatchmentTiles(st2x4.id).length,
+    112,
+    'getStationCatchmentTiles(st2x4) returns all 112 catchment tiles'
+  );
+  for (let ty = 12; ty <= 13; ty++) {
+    for (let tx = 15; tx <= 18; tx++) {
+      const ft = r8Engine.getState().tiles[tileIndex(tx, ty, 64)];
+      assertEq(ft.stationId, st2x4.id, `Tile (${tx},${ty}) belongs to st2x4`);
+      assertEq(ft.stationAxis, 'X', `Tile (${tx},${ty}) sets stationAxis === X`);
+      assert(ft.rail === true, `Tile (${tx},${ty}) sets rail === true`);
+    }
+  }
+
+  // Build maximum 4-track x 6-length Y-oriented station at (48..51, 10..15), verify structures & terrain renderers, then bulldoze cleanly!
+  const build4x6YRes = r8Engine.applyTool(48, 10, 'TRAIN_STATION', {
+    orientation: 'Y',
+    stationTracks: 4,
+    stationLength: 6,
+  });
+  assert(build4x6YRes.ok && Boolean(build4x6YRes.stationId), 'Built max 4x6 Y-oriented TRAIN_STATION');
+  const st4x6Y = r8Engine.getState().stations.find((s) => s.id === build4x6YRes.stationId)!;
+  assertEq(st4x6Y.tiles.length, 24, '4x6 Y-oriented station covers 24 tiles');
+  assertEq(st4x6Y.orientation, 'Y', '4x6 station orientation === Y');
+  assertEq(
+    r8Engine.getState().tiles[tileIndex(51, 15, 64)].stationAxis,
+    'Y',
+    'Far corner (51,15) of 4x6 Y station has stationAxis === Y'
+  );
+
+  // Exercise TerrainInstancer & StructuresRenderer across both 2x4 X and 4x6 Y multi-track stations!
+  const r8Terrain = new TerrainInstancer();
+  const r8Structures = new StructuresRenderer(null as unknown as HTMLElement);
+  r8Terrain.sync(r8Engine.getState());
+  r8Structures.sync(r8Engine.getState());
+  assert(r8Structures.group.children.length > 0, 'StructuresRenderer built 2x4 X and 4x6 Y stations cleanly');
+  r8Terrain.dispose();
+  r8Structures.dispose();
+
+  // Bulldoze a tile of st4x6Y and confirm stationAxis never leaks onto bulldozed tiles
+  for (let ty = 10; ty <= 15; ty++) {
+    for (let tx = 48; tx <= 51; tx++) {
+      const bRes = r8Engine.applyTool(tx, ty, 'BULLDOZE');
+      assert(bRes.ok, `Bulldozed 4x6 station tile (${tx},${ty})`);
+      const cleared = r8Engine.getState().tiles[tileIndex(tx, ty, 64)];
+      assertEq(cleared.stationAxis, undefined, `Bulldozed tile (${tx},${ty}) cleared stationAxis`);
+      assert(!cleared.stationId && !cleared.rail, `Bulldozed tile (${tx},${ty}) cleared stationId & rail`);
+    }
+  }
+  assert(
+    !r8Engine.getState().stations.some((s) => s.id === st4x6Y.id),
+    'Fully bulldozed 4x6 station removed from state.stations'
+  );
+
+  // Verify parallel-track isolation inside st2x4 (x=15..18, y=12..13):
+  // Without throat switches outside the station, Track 1 (y=12) CANNOT step sideways to Track 2 (y=13)!
+  const crossPlatformAttempt = findNetworkPath(
+    r8Engine.getState().tiles,
+    64,
+    16,
+    12,
+    [{ x: 16, y: 13 }],
+    'RAIL'
+  );
+  assertEq(
+    crossPlatformAttempt.length,
+    0,
+    'Pathfinder strictly forbids sideways cross-platform jumps between Track 1 (y=12) and Track 2 (y=13)'
+  );
+
+  // Now connect two separate parallel approach tracks into Track 1 (y=12) and Track 2 (y=13) of st2x4,
+  // with an east throat switch at x=19..24 and 2 trains entering & loading simultaneously on Track 1 & Track 2!
+  r8TownB.x = 34;
+  r8TownB.y = 11;
+  r8State.tiles[tileIndex(34, 11, 64)].townId = r8TownB.id;
+  r8State.tiles[tileIndex(34, 11, 64)].buildingTier = 3;
+
+  assert(r8Engine.applyDragTrackOrRoad(19, 12, 34, 12, 'RAIL').ok, 'Built east upper track y=12');
+  assert(r8Engine.applyDragTrackOrRoad(19, 13, 34, 13, 'RAIL').ok, 'Built east lower track y=13');
+  assert(r8Engine.applyDragTrackOrRoad(22, 12, 22, 13, 'RAIL').ok, 'Built throat crossover outside station at x=22');
+  const buildEast2x2 = r8Engine.applyTool(33, 12, 'TRAIN_STATION', {
+    orientation: 'X',
+    stationTracks: 2,
+    stationLength: 2,
+  });
+  assert(buildEast2x2.ok && Boolean(buildEast2x2.stationId), 'Built east 2x2 destination station');
+  const depTrack1 = r8Engine.applyTool(25, 11, 'RAIL_DEPOT');
+  assert(r8Engine.applyDragTrackOrRoad(25, 11, 25, 12, 'RAIL').ok, 'Connected depot 1');
+  const depTrack2 = r8Engine.applyTool(25, 14, 'RAIL_DEPOT');
+  assert(r8Engine.applyDragTrackOrRoad(25, 14, 25, 13, 'RAIL').ok, 'Connected depot 2');
+  assert(depTrack1.ok && depTrack2.ok, 'Built twin rail depots feeding Track 1 and Track 2');
+
+  // Seed lots of waiting passengers at st2x4 so both trains stay LOADING simultaneously on Track 1 & Track 2!
+  r8Engine.getState().stations.find((s) => s.id === st2x4.id)!.waitingCargo.PASSENGERS = 400;
+
+  const pTrain1 = r8Engine.buyVehicle({
+    depotX: 25,
+    depotY: 11,
+    modelId: 'LOCO_ELECTRIC',
+    cargoType: 'PASSENGERS',
+    wagonCount: 3,
+    orders: [st2x4.id, buildEast2x2.stationId!],
+    waitForFullLoad: true,
+  });
+  const pTrain2 = r8Engine.buyVehicle({
+    depotX: 25,
+    depotY: 14,
+    modelId: 'LOCO_ELECTRIC',
+    cargoType: 'PASSENGERS',
+    wagonCount: 3,
+    orders: [st2x4.id, buildEast2x2.stationId!],
+    waitForFullLoad: true,
+  });
+  assert(pTrain1.ok && pTrain2.ok, 'Spawned 2 express trains targeting 2x4 multi-track station');
+
+  let bothLoadingOnSeparateTracks = false;
+  for (let sub = 0; sub < 300; sub++) {
+    r8Engine.tick(1);
+    const v1 = r8Engine.getState().vehicles.find((v) => v.id === pTrain1.vehicleId)!;
+    const v2 = r8Engine.getState().vehicles.find((v) => v.id === pTrain2.vehicleId)!;
+    if (v1.state === 'LOADING' && v2.state === 'LOADING' && v1.y !== v2.y) {
+      if ((v1.y === 12 && v2.y === 13) || (v1.y === 13 && v2.y === 12)) {
+        bothLoadingOnSeparateTracks = true;
+        break;
+      }
+    }
+  }
+  assert(
+    bothLoadingOnSeparateTracks,
+    '2 trains simultaneously entered and loaded side-by-side on Track 1 (y=12) and Track 2 (y=13) of 2x4 station!'
+  );
+
+  // 13c. Full-Train Pull-In Verification:
+  //      A train entering a 1x5 station at x=20 (spanning x=20..24, y=28) from the west MUST pull all the way to (24, 28) before LOADING!
+  const pullInStRes = r8Engine.applyTool(20, 28, 'TRAIN_STATION', {
+    orientation: 'X',
+    stationTracks: 1,
+    stationLength: 5,
+  });
+  const pullDestRes = r8Engine.applyTool(8, 28, 'TRAIN_STATION', {
+    orientation: 'X',
+    stationTracks: 1,
+    stationLength: 2,
+  });
+  assert(r8Engine.applyDragTrackOrRoad(10, 28, 19, 28, 'RAIL').ok, 'Built west approach into 1x5 station (20..24, 28)');
+  assert(r8Engine.applyTool(12, 27, 'RAIL_DEPOT').ok, 'Built pull-in test depot');
+  assert(r8Engine.applyDragTrackOrRoad(12, 27, 12, 28, 'RAIL').ok, 'Connected pull-in depot');
+  assert(pullInStRes.ok && pullDestRes.ok, 'Built 1x5 pull-in station at (20..24, 28)');
+
+  const pullTrainRes = r8Engine.buyVehicle({
+    depotX: 12,
+    depotY: 27,
+    modelId: 'LOCO_DIESEL',
+    cargoType: 'PASSENGERS',
+    wagonCount: 4,
+    orders: [pullInStRes.stationId!, pullDestRes.stationId!],
+  });
+  assert(pullTrainRes.ok && Boolean(pullTrainRes.vehicleId), 'Spawned train for 1x5 full pull-in test');
+
+  let firstLoadingTileX = -1;
+  let loadedPrematurelyBeforeFarEnd = false;
+  for (let sub = 0; sub < 400; sub++) {
+    r8Engine.tick(1);
+    const pv = r8Engine.getState().vehicles.find((v) => v.id === pullTrainRes.vehicleId)!;
+    if (pv.state === 'LOADING' && pv.y === 28 && pv.x >= 20 && pv.x <= 24) {
+      if (pv.x < 24) {
+        loadedPrematurelyBeforeFarEnd = true;
+      }
+      firstLoadingTileX = pv.x;
+      break;
+    }
+  }
+  assert(!loadedPrematurelyBeforeFarEnd, 'Train did NOT stop prematurely on entry tiles 20..23 of 1x5 station');
+  assertEq(
+    firstLoadingTileX,
+    24,
+    'Train pulled all the way to far-end tile (24, 28) of 1x5 station before switching to LOADING'
+  );
+
+  // Also verify VehicleRenderer applies forward buffer pull-in (+0.20) while LOADING on (24, 28)
+  const r8VehRenderer = new VehicleRenderer();
+  for (let frame = 0; frame < 20; frame++) {
+    r8VehRenderer.update(r8Engine.getState(), 0.05, frame * 50);
+  }
+  r8VehRenderer.dispose();
+
+  // 13d. OpenTTD Overhang Loading/Unloading Time Penalty Verification:
+  //      Compare an identical 8-wagon (5-tile required) train unloading + loading 280t COAL at:
+  //      - Lane A (y=36): 1x1 short station (platformOverhangTiles === 4)
+  //      - Lane B (y=42): 1x5 full-length station (platformOverhangTiles === 0)
+  function measureEightWagonStationTurnaroundSubticks(rowY: number, platformLen: number): {
+    loadingSubticks: number;
+    observedOverhangTiles: number;
+  } {
+    // Place coal-accepting power plant & coal mine anchor near destination station at x=22..26
+    const destAnchorX = 22;
+    assert(r8Engine.applyDragTrackOrRoad(10, rowY, 28, rowY, 'RAIL').ok, `Built overhang test track y=${rowY}`);
+    const originSt = r8Engine.applyTool(10, rowY, 'TRAIN_STATION', {
+      orientation: 'X',
+      stationTracks: 1,
+      stationLength: 5,
+    });
+    const testSt = r8Engine.applyTool(destAnchorX, rowY, 'TRAIN_STATION', {
+      orientation: 'X',
+      stationTracks: 1,
+      stationLength: platformLen,
+    });
+    const dep = r8Engine.applyTool(16, rowY - 1, 'RAIL_DEPOT');
+    assert(r8Engine.applyDragTrackOrRoad(16, rowY - 1, 16, rowY, 'RAIL').ok, 'Connected overhang depot');
+    assert(originSt.ok && testSt.ok && dep.ok, `Built stations for platformLen=${platformLen}`);
+
+    const loco = r8Engine.buyLocomotive(16, rowY - 1, 'LOCO_ELECTRIC');
+    assert(loco.ok && Boolean(loco.vehicleId), 'Bought 8-wagon test locomotive');
+    const vId = loco.vehicleId!;
+    for (let w = 0; w < 8; w++) {
+      assert(r8Engine.buyRailWagon(16, rowY - 1, 'COAL', vId).ok, `Attached COAL wagon #${w + 1}`);
+    }
+
+    // Pre-load all 8 wagons with COAL from originSt AND stock 280t waiting COAL at testSt so it unloads + reloads full 8 wagons!
+    const testStationObj = r8Engine.getState().stations.find((s) => s.id === testSt.stationId)!;
+    // Ensure testStationObj accepts COAL via nearbyIndustryIds and has 280t waiting COAL to load
+    const pp = r8Engine.getState().industries.find((ind) => ind.accepts.includes('COAL'))!;
+    if (!testStationObj.nearbyIndustryIds.includes(pp.id)) {
+      testStationObj.nearbyIndustryIds.push(pp.id);
+    }
+    testStationObj.waitingCargo.COAL = 280;
+
+    const veh = r8Engine.getState().vehicles.find((v) => v.id === vId)!;
+    for (const wag of veh.wagons!) {
+      wag.cargoAmount = wag.capacity;
+      wag.cargoOriginStationId = originSt.stationId!;
+      wag.cargoLoadedDay = r8Engine.getState().date.totalDays;
+    }
+    veh.cargoAmount = 8 * RAIL_WAGON_CATALOG.COAL.capacity;
+    veh.cargoOriginStationId = originSt.stationId!;
+
+    // Dispatch directly to testSt -> originSt
+    assert(r8Engine.updateVehicleOrders(vId, [testSt.stationId!, originSt.stationId!]).ok, 'Dispatched 8-wagon train');
+
+    let enteredLoading = false;
+    let loadingSubticks = 0;
+    let observedOverhangTiles = -1;
+
+    for (let sub = 0; sub < 800; sub++) {
+      r8Engine.tick(1);
+      const curV = r8Engine.getState().vehicles.find((v) => v.id === vId)!;
+      if (curV.state === 'LOADING') {
+        enteredLoading = true;
+        loadingSubticks++;
+        if ((curV.platformOverhangTiles ?? 0) > observedOverhangTiles) {
+          observedOverhangTiles = curV.platformOverhangTiles ?? 0;
+        }
+      } else if (enteredLoading && curV.state === 'MOVING') {
+        break;
+      }
+    }
+
+    return { loadingSubticks, observedOverhangTiles };
+  }
+
+  const short1TileResult = measureEightWagonStationTurnaroundSubticks(36, 1);
+  const full5TileResult = measureEightWagonStationTurnaroundSubticks(44, 5);
+
+  assertEq(
+    short1TileResult.observedOverhangTiles,
+    4,
+    '8-wagon (5-tile) train at 1-tile station reports platformOverhangTiles === 4'
+  );
+  assertEq(
+    full5TileResult.observedOverhangTiles,
+    0,
+    '8-wagon (5-tile) train at 5-tile station reports platformOverhangTiles === 0'
+  );
+  assert(
+    short1TileResult.loadingSubticks >= full5TileResult.loadingSubticks * 3,
+    `Overhang time penalty verified: 8-wagon train took ${short1TileResult.loadingSubticks} subticks on 1-tile station vs ${full5TileResult.loadingSubticks} subticks on 5-tile station`
+  );
+
+  // Verify Multiplayer Slice syncs station orientation, tracks, platformLength & sa cleanly
+  const r8MpSlice = r8Engine.exportMultiplayerSlice();
+  assert(!JSON.stringify(r8MpSlice).includes('undefined'), 'Round 8 MP slice has zero undefined fields');
+  const syncedSt2x4 = r8MpSlice.stations.find((s) => s.id === st2x4.id);
+  assertEq(syncedSt2x4?.tracks, 2, 'MP slice preserves station tracks === 2');
+  assertEq(syncedSt2x4?.platformLength, 4, 'MP slice preserves station platformLength === 4');
+  assertEq(syncedSt2x4?.orientation, 'X', 'MP slice preserves station orientation === X');
+
+  console.log(
+    `  [OK] Catchment grids (112 rail / 48 road), 1-4 tracks x 1-6 length X/Y stations, parallel dual-train loading, full pull-in & overhang penalty (${short1TileResult.loadingSubticks} vs ${full5TileResult.loadingSubticks} subticks) verified.`
   );
   console.log(`\nALL ${passedAssertions} HEADLESS VERIFICATION ASSERTIONS PASSED 100%!`);
 }

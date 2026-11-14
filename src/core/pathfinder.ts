@@ -157,6 +157,22 @@ export function findNetworkPath(
         if (nextTile.bridge !== network) continue;
         if (nextTile.bridgeAxis && nextTile.bridgeAxis !== stepAxis) continue;
       }
+      if (network === 'RAIL') {
+        if (
+          curTile.stationId &&
+          curTile.stationAxis &&
+          curTile.stationAxis !== stepAxis
+        ) {
+          continue;
+        }
+        if (
+          nextTile.stationId &&
+          nextTile.stationAxis &&
+          nextTile.stationAxis !== stepAxis
+        ) {
+          continue;
+        }
+      }
 
       // Do not route through unrelated depots unless starting or ending there
       if (
@@ -174,14 +190,28 @@ export function findNetworkPath(
       );
       let stepCost = 1 / Math.max(0.25, slopeFactor);
 
-      if (
-        network === 'RAIL' &&
-        avoidOccupiedByOtherTrains &&
-        avoidOccupiedByOtherTrains.has(nIdx) &&
-        !goalSet.has(nIdx)
-      ) {
-        // Prefer free parallel siding / loop when another train occupies a single track
-        stepCost += 9;
+      if (network === 'RAIL' && avoidOccupiedByOtherTrains) {
+        if (avoidOccupiedByOtherTrains.has(nIdx)) {
+          // Prefer free parallel siding / loop / platform track when another train occupies a track
+          stepCost += 25;
+        } else if (
+          nextTile.stationId &&
+          curTile.stationId !== nextTile.stationId
+        ) {
+          // Entering a station platform track: check if any tile ahead on this platform track is occupied
+          for (let step = 1; step <= 8; step++) {
+            const sx = nx + dx * step;
+            const sy = ny + dy * step;
+            if (!inBounds(sx, sy, mapSize)) break;
+            const sIdx = tileIndex(sx, sy, mapSize);
+            const st = tiles[sIdx];
+            if (st.stationId !== nextTile.stationId) break;
+            if (avoidOccupiedByOtherTrains.has(sIdx)) {
+              stepCost += 25;
+              break;
+            }
+          }
+        }
       }
 
       const tentativeG = gScore[currentIdx] + stepCost;

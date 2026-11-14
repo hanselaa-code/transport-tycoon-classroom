@@ -14,9 +14,16 @@ import {
   Trash2,
   Zap,
   XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import type { CargoType, GameState } from '../../types/game';
-import { COMPANY_COLORS, GameEngine, VEHICLE_CATALOG_LIST } from '../../core';
+import {
+  COMPANY_COLORS,
+  GameEngine,
+  getEffectiveStationPlatformLength,
+  getTrainRequiredPlatformTiles,
+  VEHICLE_CATALOG_LIST,
+} from '../../core';
 import {
   CARGO_COLORS,
   CARGO_LABELS_NO,
@@ -156,11 +163,18 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
   const catalogSpec = VEHICLE_CATALOG_LIST.find((c) => c.id === vehicle.modelId);
   const trainWagons =
     vehicle.network === 'RAIL' ? resolveTrainWagonsList(vehicle) : [];
+  const requiredPlatformTiles =
+    vehicle.network === 'RAIL'
+      ? getTrainRequiredPlatformTiles(trainWagons.length)
+      : 1;
 
   // Aggregate per-cargo breakdown for mixed-consist trains
   const cargoTotals = (() => {
     if (vehicle.network !== 'RAIL' || trainWagons.length === 0) return [];
-    const map = new Map<CargoType, { amount: number; capacity: number; count: number }>();
+    const map = new Map<
+      CargoType,
+      { amount: number; capacity: number; count: number }
+    >();
     for (const w of trainWagons) {
       const prev = map.get(w.cargoType) ?? { amount: 0, capacity: 0, count: 0 };
       prev.amount += w.cargoAmount;
@@ -216,7 +230,7 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
         theme="purple"
         defaultX={592}
         defaultY={58}
-        width={485}
+        width={488}
         zIndex={zIndex}
         onFocus={onFocus}
         onClose={onClose}
@@ -239,7 +253,9 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
               <div className="text-[10px] text-slate-300 ttd-num">
                 {catalogSpec?.nameNo ?? vehicle.modelId}
                 {vehicle.network === 'RAIL'
-                  ? ` • ${trainWagons.length} vogner`
+                  ? ` • Lengde: ${requiredPlatformTiles} ${
+                      requiredPlatformTiles === 1 ? 'rute' : 'ruter'
+                    } (Lok + ${trainWagons.length} vogner)`
                   : ''}{' '}
                 • Maksfart {vehicle.maxSpeedKmh} km/t
               </div>
@@ -417,9 +433,7 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
     if (!res.ok && res.message) {
       setFeedback({ ok: false, msg: res.message });
     } else {
-      setFeedback(
-        res.message ? { ok: true, msg: res.message } : null
-      );
+      setFeedback(res.message ? { ok: true, msg: res.message } : null);
     }
   };
 
@@ -499,6 +513,11 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
     }
   };
 
+  const activeOverhangTiles =
+    vehicle.network === 'RAIL' && vehicle.state === 'LOADING'
+      ? vehicle.platformOverhangTiles ?? 0
+      : 0;
+
   return (
     <TTDWindow
       id="vehicle_detail"
@@ -518,7 +537,7 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
       theme="slate"
       defaultX={592}
       defaultY={58}
-      width={488}
+      width={496}
       zIndex={zIndex}
       onFocus={onFocus}
       onClose={(id) => {
@@ -600,12 +619,32 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
         </div>
       )}
 
+      {/* Live Overhang Alert while LOADING on a too-short station */}
+      {activeOverhangTiles > 0 && (
+        <div className="ttd-inset p-2 bg-amber-950/70 border border-amber-500/80 flex items-start gap-1.5 text-[11px] text-amber-200">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <span>
+            <strong>For kort plattform!</strong> Toget stikker{' '}
+            <strong>
+              {activeOverhangTiles}{' '}
+              {activeOverhangTiles === 1 ? 'rute' : 'ruter'}
+            </strong>{' '}
+            utenfor stasjonsplattformen — tidsstraff gir tregere av- og
+            pålasting!
+          </span>
+        </div>
+      )}
+
       {/* LIVE VISUAL CONSIST STRIP */}
       <div className="ttd-panel p-2 space-y-1.5">
-        <div className="flex items-center justify-between text-[10px] text-slate-300 ttd-num">
-          <span className="font-bold text-amber-200 uppercase tracking-wider">
+        <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] text-slate-300 ttd-num">
+          <span className="font-bold text-amber-200">
             {vehicle.network === 'RAIL'
-              ? `Togsett (${trainWagons.length} vogner)`
+              ? `Lengde: ${requiredPlatformTiles} ${
+                  requiredPlatformTiles === 1 ? 'rute' : 'ruter'
+                } (Lok + ${trainWagons.length} ${
+                  trainWagons.length === 1 ? 'vogn' : 'vogner'
+                })`
               : 'Kjøretøy & Lasteplan'}
           </span>
           <span>
@@ -834,9 +873,7 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
           ) : (
             <button
               type="button"
-              onClick={() =>
-                handleSendToDepot(Boolean(vehicle.goingToDepot))
-              }
+              onClick={() => handleSendToDepot(Boolean(vehicle.goingToDepot))}
               className={`ttd-btn flex-1 !py-1.5 ${
                 vehicle.goingToDepot ? 'ttd-btn-active' : 'ttd-btn-teal'
               }`}
@@ -897,7 +934,11 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
         <div className="flex items-center gap-1.5">
           {compatibleStations.length === 0 ? (
             <div className="text-[11px] text-amber-300/90">
-              Ingen {vehicle.network === 'RAIL' ? 'togstasjoner' : 'holdeplasser/terminaler'} bygget ennå.
+              Ingen{' '}
+              {vehicle.network === 'RAIL'
+                ? 'togstasjoner'
+                : 'holdeplasser/terminaler'}{' '}
+              bygget ennå.
             </div>
           ) : (
             <>
@@ -906,11 +947,21 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
                 onChange={(e) => setDropdownStationId(e.target.value)}
                 className="ttd-inset px-2 py-1 text-xs flex-1 text-slate-100 min-w-0"
               >
-                {compatibleStations.map((st) => (
-                  <option key={st.id} value={st.id}>
-                    {st.name} ({STATION_KIND_LABELS_NO[st.kind]})
-                  </option>
-                ))}
+                {compatibleStations.map((st) => {
+                  const stLen =
+                    st.kind === 'TRAIN_STATION'
+                      ? getEffectiveStationPlatformLength(st)
+                      : 1;
+                  return (
+                    <option key={st.id} value={st.id}>
+                      {st.name} (
+                      {st.kind === 'TRAIN_STATION'
+                        ? `${stLen} ${stLen === 1 ? 'rute' : 'ruter'}`
+                        : STATION_KIND_LABELS_NO[st.kind]}
+                      )
+                    </option>
+                  );
+                })}
               </select>
               <button
                 type="button"
@@ -924,11 +975,12 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
           )}
         </div>
 
-        {/* Orders List */}
-        <div className="ttd-inset divide-y divide-slate-800 max-h-40 overflow-y-auto">
+        {/* Orders List with Platform Length Warning Badge */}
+        <div className="ttd-inset divide-y divide-slate-800 max-h-44 overflow-y-auto">
           {vehicle.orders.length === 0 ? (
             <div className="p-2.5 text-center text-slate-400 text-[11px]">
-              Ingen stopp i ruten ennå. Legg til minst <strong>2 stasjoner</strong> og trykk Start!
+              Ingen stopp i ruten ennå. Legg til minst{' '}
+              <strong>2 stasjoner</strong> og trykk Start!
             </div>
           ) : (
             vehicle.orders.map((stId, idx) => {
@@ -936,6 +988,14 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
               const isCurrent =
                 vehicle.orders.length > 0 &&
                 idx === vehicle.currentOrderIndex % vehicle.orders.length;
+              const stPlatformLen =
+                st && st.kind === 'TRAIN_STATION'
+                  ? getEffectiveStationPlatformLength(st)
+                  : null;
+              const isShortPlatform =
+                vehicle.network === 'RAIL' &&
+                stPlatformLen !== null &&
+                stPlatformLen < requiredPlatformTiles;
 
               return (
                 <div
@@ -944,24 +1004,42 @@ export const VehicleDetailWindow: React.FC<VehicleDetailWindowProps> = ({
                     isCurrent ? 'bg-emerald-950/45 text-emerald-200' : ''
                   }`}
                 >
-                  <div
-                    onClick={() => {
-                      if (st) onOpenStation(st.id);
-                    }}
-                    className={`flex items-center gap-1.5 min-w-0 ${
-                      st ? 'cursor-pointer hover:underline' : ''
-                    }`}
-                  >
-                    <span className="font-bold text-amber-300 w-5 ttd-num">
-                      {isCurrent ? '▶' : `${idx + 1}.`}
-                    </span>
-                    <span className="font-semibold truncate">
-                      {st ? st.name : `Slettet stasjon (${stId})`}
-                    </span>
-                    {st && (
-                      <span className="text-[10px] text-slate-400">
-                        ({STATION_KIND_LABELS_NO[st.kind]})
+                  <div className="min-w-0 space-y-0.5">
+                    <div
+                      onClick={() => {
+                        if (st) onOpenStation(st.id);
+                      }}
+                      className={`flex items-center gap-1.5 min-w-0 ${
+                        st ? 'cursor-pointer hover:underline' : ''
+                      }`}
+                    >
+                      <span className="font-bold text-amber-300 w-5 ttd-num shrink-0">
+                        {isCurrent ? '▶' : `${idx + 1}.`}
                       </span>
+                      <span className="font-semibold truncate">
+                        {st ? st.name : `Slettet stasjon (${stId})`}
+                      </span>
+                      {st && (
+                        <span className="text-[10px] text-slate-400 shrink-0 ttd-num">
+                          (
+                          {stPlatformLen !== null
+                            ? `${stPlatformLen} ${
+                                stPlatformLen === 1 ? 'rute' : 'ruter'
+                              }`
+                            : STATION_KIND_LABELS_NO[st.kind]}
+                          )
+                        </span>
+                      )}
+                    </div>
+
+                    {isShortPlatform && (
+                      <div className="pl-5 text-[10px] text-amber-300 font-semibold flex items-center gap-1 ttd-num">
+                        <span>
+                          ⚠️ Plattform kun {stPlatformLen}{' '}
+                          {stPlatformLen === 1 ? 'rute' : 'ruter'} (toget krever{' '}
+                          {requiredPlatformTiles}) — treg av-/pålasting
+                        </span>
+                      </div>
                     )}
                   </div>
 

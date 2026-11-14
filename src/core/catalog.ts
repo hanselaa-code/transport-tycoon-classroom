@@ -6,6 +6,7 @@ import {
   IndustryType,
   RailWagonSpec,
   RoadVehicleShopSpec,
+  Station,
   StationKind,
   ToolType,
   Vehicle,
@@ -435,6 +436,8 @@ export const MAX_MONTHLY_GROSS_SALARY_KR = 150_000;
 export const STATION_CATCHMENT_RADIUS = 4;
 export const ROAD_STATION_CATCHMENT_RADIUS = 3;
 export const RAIL_STATION_CATCHMENT_RADIUS = 4;
+export const MAX_STATION_TRACKS = 4;
+export const MAX_STATION_LENGTH = 6;
 export const HQ_BONUS_RADIUS = 18;
 export const TOTAL_AI_SHARES = 10_000;
 export const MAX_PLAYER_AI_SHARE_PCT = 75;
@@ -444,6 +447,84 @@ export function getStationCatchmentRadius(kind: StationKind): number {
   return kind === 'TRAIN_STATION'
     ? RAIL_STATION_CATCHMENT_RADIUS
     : ROAD_STATION_CATCHMENT_RADIUS;
+}
+
+export function getTrainRequiredPlatformTiles(wagonCount: number): number {
+  return Math.max(1, Math.ceil((1 + Math.max(0, wagonCount)) / 2));
+}
+
+export function getEffectiveStationPlatformLength(
+  station: Pick<Station, 'kind' | 'tiles' | 'orientation' | 'platformLength'>
+): number {
+  if (station.kind !== 'TRAIN_STATION') {
+    return 1;
+  }
+  if (
+    typeof station.platformLength === 'number' &&
+    Number.isFinite(station.platformLength) &&
+    station.platformLength >= 1
+  ) {
+    return Math.round(station.platformLength);
+  }
+  if (!station.tiles || station.tiles.length === 0) {
+    return 1;
+  }
+  let minX = station.tiles[0].x;
+  let maxX = station.tiles[0].x;
+  let minY = station.tiles[0].y;
+  let maxY = station.tiles[0].y;
+  for (const t of station.tiles) {
+    if (t.x < minX) minX = t.x;
+    if (t.x > maxX) maxX = t.x;
+    if (t.y < minY) minY = t.y;
+    if (t.y > maxY) maxY = t.y;
+  }
+  const spanX = maxX - minX + 1;
+  const spanY = maxY - minY + 1;
+  if (station.orientation === 'X') {
+    return Math.max(1, spanX);
+  }
+  if (station.orientation === 'Y') {
+    return Math.max(1, spanY);
+  }
+  return Math.max(1, spanX, spanY);
+}
+
+export function getEffectiveStationTracks(
+  station: Pick<Station, 'kind' | 'tiles' | 'orientation' | 'tracks'>
+): number {
+  if (station.kind !== 'TRAIN_STATION') {
+    return 1;
+  }
+  if (
+    typeof station.tracks === 'number' &&
+    Number.isFinite(station.tracks) &&
+    station.tracks >= 1
+  ) {
+    return Math.round(station.tracks);
+  }
+  if (!station.tiles || station.tiles.length === 0) {
+    return 1;
+  }
+  let minX = station.tiles[0].x;
+  let maxX = station.tiles[0].x;
+  let minY = station.tiles[0].y;
+  let maxY = station.tiles[0].y;
+  for (const t of station.tiles) {
+    if (t.x < minX) minX = t.x;
+    if (t.x > maxX) maxX = t.x;
+    if (t.y < minY) minY = t.y;
+    if (t.y > maxY) maxY = t.y;
+  }
+  const spanX = maxX - minX + 1;
+  const spanY = maxY - minY + 1;
+  if (station.orientation === 'X') {
+    return Math.max(1, spanY);
+  }
+  if (station.orientation === 'Y') {
+    return Math.max(1, spanX);
+  }
+  return Math.max(1, Math.min(spanX, spanY));
 }
 
 export function calculateVehiclePurchaseCost(

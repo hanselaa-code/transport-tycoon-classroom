@@ -23,6 +23,7 @@ import type {
 import {
   ALL_CARGO_TYPES,
   GameEngine,
+  getTrainRequiredPlatformTiles,
   MAX_TRAIN_WAGONS,
   RAIL_WAGON_CATALOG,
   RAIL_WAGON_CATALOG_LIST,
@@ -682,6 +683,7 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                   vehiclesInDepot.map((train, trackIdx) => {
                     const isSelected = selectedVehicleInDepot?.id === train.id;
                     const wagons = resolveTrainWagonsList(train);
+                    const reqTiles = getTrainRequiredPlatformTiles(wagons.length);
                     const isHoveringTrack =
                       dragHoverTarget === `track:${train.id}`;
 
@@ -709,15 +711,15 @@ export const DepotAndOrdersWindow: React.FC<DepotAndOrdersWindowProps> = ({
                       >
                         {/* Track header row */}
                         <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-                          <div className="flex items-center gap-1.5 min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                             <span className="px-1.5 py-0.2 bg-slate-800 border border-slate-600 text-[10px] font-bold text-amber-300 ttd-num">
                               Spor {trackIdx + 1}
                             </span>
                             <span className="font-bold text-amber-100 truncate">
                               {train.name}
                             </span>
-                            <span className="text-[10px] text-slate-400 ttd-num">
-                              ({wagons.length}/{MAX_TRAIN_WAGONS} vogner)
+                            <span className="text-[10px] text-sky-300 font-semibold ttd-num">
+                              • Lengde: {reqTiles} {reqTiles === 1 ? 'rute' : 'ruter'} (Lok + {wagons.length}/{MAX_TRAIN_WAGONS} vogner)
                             </span>
                           </div>
 

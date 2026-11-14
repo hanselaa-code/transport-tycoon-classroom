@@ -17,11 +17,13 @@ import {
   MapSizeOption,
   ModifiedTileDelta,
   RemotePlayerWorldSlice,
+  RemoteStationSnapshot,
   RemoteVehicleSnapshot,
   ScenarioType,
   Station,
   StationDetailsInfo,
   StationKind,
+  StationPlacementPreview,
   Tile,
   TileInspectionInfo,
   ToolType,
@@ -50,8 +52,14 @@ import {
   formatGameDate,
   formatKr,
   formatNorwegianNumber,
+  getEffectiveStationPlatformLength,
+  getEffectiveStationTracks,
   getHQTierSpec,
+  getStationCatchmentRadius,
+  getTrainRequiredPlatformTiles,
   INDUSTRY_LABELS_NO,
+  MAX_STATION_LENGTH,
+  MAX_STATION_TRACKS,
   MAX_TRAIN_WAGONS,
   RAIL_WAGON_CATALOG,
   ROAD_REFIT_COST_KR,
@@ -123,6 +131,7 @@ export interface DragPreviewResult {
 }
 
 export interface ApplyToolOptions {
+  stationTracks?: number;
   stationLength?: number;
   orientation?: 'X' | 'Y';
   bridgeType?: BridgeType;
@@ -569,11 +578,90 @@ export class GameEngine {
     vehicle.speedKmh = 0;
     vehicle.accelTicks = 0;
     vehicle.loadingTicksRemaining = 0;
+    vehicle.platformOverhangTiles = 0;
     vehicle.fullLoadWaitTicks = 0;
     vehicle.goingToDepot = null;
     vehicle.state = 'IN_DEPOT';
     vehicle.path = [];
     vehicle.trail = [{ x: depotX, y: depotY }];
+  }
+
+  private extendRailPathToPlatformEnd(
+    vehicle: Vehicle,
+    rawPath: GridPoint[],
+    station: Station,
+    occupiedByOthers?: Set<number>
+  ): GridPoint[] {
+    if (
+      rawPath.length === 0 ||
+      station.kind !== 'TRAIN_STATION' ||
+      station.tiles.length <= 1
+    ) {
+      return rawPath;
+    }
+
+    const entry = rawPath[rawPath.length - 1];
+    if (!station.tiles.some((t) => t.x === entry.x && t.y === entry.y)) {
+      return rawPath;
+    }
+
+    const prev =
+      rawPath.length >= 2
+        ? rawPath[rawPath.length - 2]
+        : { x: vehicle.x, y: vehicle.y };
+    let stepDx = Math.sign(entry.x - prev.x);
+    let stepDy = Math.sign(entry.y - prev.y);
+
+    const entryTile = inBounds(entry.x, entry.y, this.state.mapSize)
+      ? this.state.tiles[tileIndex(entry.x, entry.y, this.state.mapSize)]
+      : undefined;
+    const axis: 'X' | 'Y' | undefined =
+      entryTile?.stationAxis ?? station.orientation;
+
+    if (axis === 'X' && stepDx === 0) {
+      stepDy = 0;
+      stepDx = station.tiles.some(
+        (t) => t.x === entry.x + 1 && t.y === entry.y
+      )
+        ? 1
+        : station.tiles.some((t) => t.x === entry.x - 1 && t.y === entry.y)
+          ? -1
+          : 0;
+    } else if (axis === 'Y' && stepDy === 0) {
+      stepDx = 0;
+      stepDy = station.tiles.some(
+        (t) => t.x === entry.x && t.y === entry.y + 1
+      )
+        ? 1
+        : station.tiles.some((t) => t.x === entry.x && t.y === entry.y - 1)
+          ? -1
+          : 0;
+    }
+
+    if (stepDx === 0 && stepDy === 0) {
+      return rawPath;
+    }
+
+    const extended = [...rawPath];
+    let cx = entry.x + stepDx;
+    let cy = entry.y + stepDy;
+    while (
+      inBounds(cx, cy, this.state.mapSize) &&
+      station.tiles.some((t) => t.x === cx && t.y === cy)
+    ) {
+      const idx = tileIndex(cx, cy, this.state.mapSize);
+      if (occupiedByOthers && occupiedByOthers.has(idx)) {
+        break;
+      }
+      if (extended.some((p) => p.x === cx && p.y === cy)) {
+        break;
+      }
+      extended.push({ x: cx, y: cy });
+      cx += stepDx;
+      cy += stepDy;
+    }
+
+    return extended;
   }
 
   private stepVehicleSubTick(vehicle: Vehicle): void {
@@ -628,8 +716,34 @@ export class GameEngine {
       );
 
       if (atTargetStation) {
-        this.handleVehicleAtStation(vehicle, targetStation);
-        return;
+        if (
+          vehicle.network === 'RAIL' &&
+          vehicle.state !== 'LOADING' &&
+          vehicle.path.length > 0 &&
+          targetStation.tiles.some(
+            (t) => t.x === vehicle.path[0].x && t.y === vehicle.path[0].y
+          )
+        ) {
+          const pullCheck =
+            vehicle.progress > 0
+              ? { allowed: true }
+              : canTrainEnterNextTile(
+                  vehicle,
+                  vehicle.path[0],
+                  this.state.tiles,
+                  this.state.mapSize,
+                  this.state.vehicles
+                );
+          if (!pullCheck.allowed) {
+            vehicle.path = [];
+            this.handleVehicleAtStation(vehicle, targetStation);
+            return;
+          }
+          // Pull forward along the platform until reaching the far-end tile!
+        } else {
+          this.handleVehicleAtStation(vehicle, targetStation);
+          return;
+        }
       }
 
       goalTiles = targetStation.tiles;
@@ -686,6 +800,14 @@ export class GameEngine {
         vehicle.speedKmh = 0;
         return;
       }
+      if (vehicle.network === 'RAIL' && targetStation) {
+        vehicle.path = this.extendRailPathToPlatformEnd(
+          vehicle,
+          vehicle.path,
+          targetStation,
+          avoidSet
+        );
+      }
     }
 
     let nextStep = vehicle.path[0];
@@ -720,16 +842,24 @@ export class GameEngine {
           altPath.length > 0 &&
           (altPath[0].x !== nextStep.x || altPath[0].y !== nextStep.y)
         ) {
+          const fullAltPath = targetStation
+            ? this.extendRailPathToPlatformEnd(
+                vehicle,
+                altPath,
+                targetStation,
+                occupied
+              )
+            : altPath;
           const altCheck = canTrainEnterNextTile(
-            { ...vehicle, path: altPath },
-            altPath[0],
+            { ...vehicle, path: fullAltPath },
+            fullAltPath[0],
             this.state.tiles,
             this.state.mapSize,
             this.state.vehicles
           );
           if (altCheck.allowed) {
-            vehicle.path = altPath;
-            nextStep = altPath[0];
+            vehicle.path = fullAltPath;
+            nextStep = fullAltPath[0];
             check = altCheck;
           }
         }
@@ -928,6 +1058,21 @@ export class GameEngine {
   }
 
   private handleVehicleAtStation(vehicle: Vehicle, station: Station): void {
+    const isRail = vehicle.network === 'RAIL';
+    const wagons = isRail ? this.ensureTrainWagons(vehicle) : [];
+    const requiredTiles = isRail
+      ? getTrainRequiredPlatformTiles(wagons.length)
+      : 1;
+    const platformLen = isRail
+      ? getEffectiveStationPlatformLength(station)
+      : 1;
+    const overhangTiles = isRail
+      ? Math.max(0, requiredTiles - platformLen)
+      : 0;
+    vehicle.platformOverhangTiles = overhangTiles;
+    const initialDwellSubticks =
+      overhangTiles > 0 ? 5 + overhangTiles * 7 : 5;
+
     if (this.syncedPeerIds.has(vehicle.ownerId)) {
       if (vehicle.state !== 'LOADING') {
         vehicle.state = 'LOADING';
@@ -936,7 +1081,7 @@ export class GameEngine {
         vehicle.accelTicks = 0;
         vehicle.nextX = vehicle.x;
         vehicle.nextY = vehicle.y;
-        vehicle.loadingTicksRemaining = 5;
+        vehicle.loadingTicksRemaining = initialDwellSubticks;
       } else {
         vehicle.loadingTicksRemaining = Math.max(
           0,
@@ -947,14 +1092,12 @@ export class GameEngine {
             (vehicle.currentOrderIndex + 1) % Math.max(1, vehicle.orders.length);
           vehicle.state = 'MOVING';
           vehicle.accelTicks = 0;
+          vehicle.platformOverhangTiles = 0;
           vehicle.path = [];
         }
       }
       return;
     }
-
-    const isRail = vehicle.network === 'RAIL';
-    const wagons = isRail ? this.ensureTrainWagons(vehicle) : [];
 
     if (vehicle.state !== 'LOADING') {
       vehicle.state = 'LOADING';
@@ -964,7 +1107,7 @@ export class GameEngine {
       vehicle.fullLoadWaitTicks = 0;
       vehicle.nextX = vehicle.x;
       vehicle.nextY = vehicle.y;
-      vehicle.loadingTicksRemaining = 5;
+      vehicle.loadingTicksRemaining = initialDwellSubticks;
 
       // 1. Unload & Deliver accepted cargo from a DIFFERENT station (per wagon on RAIL, single hold on ROAD)
       let totalStationPayout = 0;
@@ -1079,13 +1222,18 @@ export class GameEngine {
     station.lastVehicleMaxSpeedKmh = vehicle.maxSpeedKmh;
 
     if (isRail) {
+      const railLoadBudget =
+        overhangTiles > 0
+          ? Math.max(2, Math.round(10 / (1 + overhangTiles * 0.8)))
+          : 12;
       const perCargoBudget = new Map<CargoType, number>();
       for (const w of wagons) {
         const available = station.waitingCargo[w.cargoType] ?? 0;
         const freeSpace = w.capacity - w.cargoAmount;
         if (available <= 0 || freeSpace <= 0) continue;
 
-        const remainingBudget = perCargoBudget.get(w.cargoType) ?? 10;
+        const remainingBudget =
+          perCargoBudget.get(w.cargoType) ?? railLoadBudget;
         if (remainingBudget <= 0) continue;
 
         const toLoad = Math.min(available, freeSpace, remainingBudget);
@@ -1167,6 +1315,7 @@ export class GameEngine {
       vehicle.state = 'MOVING';
       vehicle.accelTicks = 0;
       vehicle.fullLoadWaitTicks = 0;
+      vehicle.platformOverhangTiles = 0;
       vehicle.path = [];
     }
   }
@@ -1341,48 +1490,72 @@ export class GameEngine {
       tool === 'BUS_STOP' ||
       tool === 'TRUCK_BAY'
     ) {
-      const stationLength =
-        tool === 'TRAIN_STATION'
-          ? Math.max(1, Math.min(3, Math.round(options?.stationLength ?? 1)))
-          : 1;
-      const orientation = options?.orientation ?? 'X';
-      const targetTiles: GridPoint[] = [];
+      const isRailStation = tool === 'TRAIN_STATION';
+      const tracks = isRailStation
+        ? Math.max(
+            1,
+            Math.min(MAX_STATION_TRACKS, Math.round(options?.stationTracks ?? 1))
+          )
+        : 1;
+      const stationLength = isRailStation
+        ? Math.max(
+            1,
+            Math.min(MAX_STATION_LENGTH, Math.round(options?.stationLength ?? 1))
+          )
+        : 1;
 
-      for (let i = 0; i < stationLength; i++) {
-        const tx = orientation === 'X' ? rx + i : rx;
-        const ty = orientation === 'Y' ? ry + i : ry;
-        if (!inBounds(tx, ty, this.state.mapSize)) {
-          return { ok: false, message: 'Stasjonen går utenfor kartkanten.' };
+      let orientation: 'X' | 'Y' =
+        options?.orientation === 'Y' ? 'Y' : 'X';
+      if (
+        isRailStation &&
+        options?.orientation === undefined &&
+        tracks === 1 &&
+        stationLength === 1
+      ) {
+        const hasRailX =
+          (inBounds(rx - 1, ry, this.state.mapSize) &&
+            this.state.tiles[tileIndex(rx - 1, ry, this.state.mapSize)].rail) ||
+          (inBounds(rx + 1, ry, this.state.mapSize) &&
+            this.state.tiles[tileIndex(rx + 1, ry, this.state.mapSize)].rail);
+        const hasRailY =
+          (inBounds(rx, ry - 1, this.state.mapSize) &&
+            this.state.tiles[tileIndex(rx, ry - 1, this.state.mapSize)].rail) ||
+          (inBounds(rx, ry + 1, this.state.mapSize) &&
+            this.state.tiles[tileIndex(rx, ry + 1, this.state.mapSize)].rail);
+        if (hasRailY && !hasRailX) {
+          orientation = 'Y';
         }
-        const tt = this.state.tiles[tileIndex(tx, ty, this.state.mapSize)];
-        if (
-          tt.terrain === 'WATER' ||
-          tt.industryId ||
-          tt.hqOwnerId ||
-          tt.depot ||
-          tt.stationId ||
-          (tt.buildingTier ?? 0) > 0 ||
-          (tool === 'TRAIN_STATION' && tt.road) ||
-          (tool !== 'TRAIN_STATION' && tt.rail)
-        ) {
-          return {
-            ok: false,
-            message: 'Kan ikke plassere stasjon her — ruten er opptatt eller ulendt.',
-          };
-        }
-        targetTiles.push({ x: tx, y: ty });
       }
 
-      const cost = BUILD_COSTS[tool] * targetTiles.length;
-      if (this.state.corporate.cash < cost) {
-        return { ok: false, message: 'Ikke nok selskapskontanter til stasjon.' };
+      const preview = this.previewStationPlacement(rx, ry, tool, {
+        orientation,
+        stationTracks: tracks,
+        stationLength,
+      });
+      if (!preview.ok) {
+        return {
+          ok: false,
+          message:
+            preview.reason ??
+            'Kan ikke plassere stasjon her — ruten er opptatt eller ulendt.',
+        };
       }
+
+      const targetTiles: GridPoint[] = preview.footprintTiles.map((ft) => ({
+        x: ft.x,
+        y: ft.y,
+      }));
+      const cost = preview.cost;
 
       this.spendCorporateConstruction(cost, rx, ry);
 
-      // Check if adjacent to an existing player station of the same kind (<= 3 tiles total) to extend platform cleanly
+      // Legacy 1x1 auto-merge ONLY when no explicit orientation/stationTracks/multi-length options were supplied
+      const allowLegacyAutoMerge =
+        options?.orientation === undefined &&
+        options?.stationTracks === undefined &&
+        (options?.stationLength ?? 1) === 1;
       let mergedStation: Station | undefined;
-      if (stationLength === 1) {
+      if (allowLegacyAutoMerge && tracks === 1 && stationLength === 1) {
         mergedStation = this.state.stations.find(
           (s) =>
             s.ownerId === 'player' &&
@@ -1400,10 +1573,37 @@ export class GameEngine {
         tt.stationId = mergedStation.id;
         tt.ownerId = 'player';
         tt.signal = false;
-        if (tool === 'TRAIN_STATION') tt.rail = true;
-        else tt.road = true;
+        tt.signalBlocked = false;
 
         mergedStation.tiles.push({ x: rx, y: ry });
+        if (isRailStation) {
+          tt.rail = true;
+          const anchor0 = mergedStation.tiles[0];
+          const mergeAxis: 'X' | 'Y' =
+            Math.abs(rx - anchor0.x) >= Math.abs(ry - anchor0.y) ? 'X' : 'Y';
+          mergedStation.orientation = mergeAxis;
+          for (const pt of mergedStation.tiles) {
+            this.state.tiles[
+              tileIndex(pt.x, pt.y, this.state.mapSize)
+            ].stationAxis = mergeAxis;
+          }
+          mergedStation.platformLength = getEffectiveStationPlatformLength({
+            ...mergedStation,
+            orientation: mergeAxis,
+            platformLength: undefined,
+          });
+          mergedStation.tracks = getEffectiveStationTracks({
+            ...mergedStation,
+            orientation: mergeAxis,
+            tracks: undefined,
+          });
+        } else {
+          tt.road = true;
+          tt.stationAxis = undefined;
+        }
+
+        mergedStation.x = Math.min(...mergedStation.tiles.map((p) => p.x));
+        mergedStation.y = Math.min(...mergedStation.tiles.map((p) => p.y));
         refreshStationCatchment(this.state, mergedStation);
         seedInitialStationCargo(this.state, mergedStation);
         this.state.networkRevision = (this.state.networkRevision ?? 0) + 1;
@@ -1430,8 +1630,14 @@ export class GameEngine {
         tt.stationId = id;
         tt.ownerId = 'player';
         tt.signal = false;
-        if (tool === 'TRAIN_STATION') tt.rail = true;
-        else tt.road = true;
+        tt.signalBlocked = false;
+        if (isRailStation) {
+          tt.rail = true;
+          tt.stationAxis = orientation;
+        } else {
+          tt.road = true;
+          tt.stationAxis = undefined;
+        }
       }
 
       const nearestTown = this.state.towns.reduce((best, t) =>
@@ -1460,12 +1666,19 @@ export class GameEngine {
         x: rx,
         y: ry,
         tiles: targetTiles,
+        ...(isRailStation
+          ? {
+              orientation,
+              tracks,
+              platformLength: stationLength,
+            }
+          : {}),
         townId: null,
         nearbyIndustryIds: [],
         waitingCargo: createEmptyCargoRecord(),
         ratings: createInitialRatingsRecord(),
         daysSincePickup: 0,
-        lastVehicleMaxSpeedKmh: tool === 'TRAIN_STATION' ? 90 : 75,
+        lastVehicleMaxSpeedKmh: isRailStation ? 90 : 75,
       };
 
       refreshStationCatchment(this.state, station);
@@ -1478,7 +1691,9 @@ export class GameEngine {
         ok: true,
         cost,
         stationId: station.id,
-        message: `Bygget ${station.name}.`,
+        message: isRailStation
+          ? `Bygget ${station.name} (${tracks} spor × ${stationLength} lengde).`
+          : `Bygget ${station.name}.`,
       };
     }
 
@@ -1546,8 +1761,18 @@ export class GameEngine {
               v.orders = v.orders.filter((oid) => oid !== stId);
             }
           } else {
-            st.x = st.tiles[0].x;
-            st.y = st.tiles[0].y;
+            st.x = Math.min(...st.tiles.map((p) => p.x));
+            st.y = Math.min(...st.tiles.map((p) => p.y));
+            if (st.kind === 'TRAIN_STATION') {
+              st.platformLength = getEffectiveStationPlatformLength({
+                ...st,
+                platformLength: undefined,
+              });
+              st.tracks = getEffectiveStationTracks({
+                ...st,
+                tracks: undefined,
+              });
+            }
             refreshStationCatchment(this.state, st);
           }
         }
@@ -1563,6 +1788,7 @@ export class GameEngine {
       tile.bridgeElevation = undefined;
       tile.depot = null;
       tile.stationId = null;
+      tile.stationAxis = undefined;
       tile.ownerId = null;
       if (wasBridge) {
         tile.terrain = 'WATER';
@@ -3590,6 +3816,285 @@ export class GameEngine {
     };
   }
 
+  public previewStationPlacement(
+    x: number,
+    y: number,
+    kind: 'TRAIN_STATION' | 'BUS_STOP' | 'TRUCK_BAY',
+    options?: {
+      orientation?: 'X' | 'Y';
+      stationTracks?: number;
+      stationLength?: number;
+    }
+  ): StationPlacementPreview {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    const isRailStation = kind === 'TRAIN_STATION';
+    const tracks = isRailStation
+      ? Math.max(
+          1,
+          Math.min(MAX_STATION_TRACKS, Math.round(options?.stationTracks ?? 1))
+        )
+      : 1;
+    const platformLength = isRailStation
+      ? Math.max(
+          1,
+          Math.min(MAX_STATION_LENGTH, Math.round(options?.stationLength ?? 1))
+        )
+      : 1;
+    const orientation: 'X' | 'Y' = options?.orientation === 'Y' ? 'Y' : 'X';
+    const catchmentRadius = getStationCatchmentRadius(kind);
+    const totalTileCount = tracks * platformLength;
+    const cost = BUILD_COSTS[kind] * totalTileCount;
+
+    const rawCoords: GridPoint[] = [];
+    for (let t = 0; t < tracks; t++) {
+      for (let l = 0; l < platformLength; l++) {
+        const tx = orientation === 'X' ? rx + l : rx + t;
+        const ty = orientation === 'X' ? ry + t : ry + l;
+        rawCoords.push({ x: tx, y: ty });
+      }
+    }
+
+    let anchorElevation: number | null = null;
+    if (inBounds(rx, ry, this.state.mapSize)) {
+      const anchorTile =
+        this.state.tiles[tileIndex(rx, ry, this.state.mapSize)];
+      if (anchorTile.terrain !== 'WATER') {
+        anchorElevation = anchorTile.elevation;
+      }
+    }
+    if (anchorElevation === null) {
+      for (const pt of rawCoords) {
+        if (!inBounds(pt.x, pt.y, this.state.mapSize)) continue;
+        const tt = this.state.tiles[tileIndex(pt.x, pt.y, this.state.mapSize)];
+        if (tt.terrain !== 'WATER') {
+          anchorElevation = tt.elevation;
+          break;
+        }
+      }
+    }
+
+    let hasOutOfBounds = false;
+    let hasSlopeMismatch = false;
+    const footprintTiles: Array<{ x: number; y: number; valid: boolean }> = [];
+    const footprintIdxSet = new Set<number>();
+
+    for (const pt of rawCoords) {
+      if (!inBounds(pt.x, pt.y, this.state.mapSize)) {
+        hasOutOfBounds = true;
+        continue;
+      }
+      const idx = tileIndex(pt.x, pt.y, this.state.mapSize);
+      const tt = this.state.tiles[idx];
+      footprintIdxSet.add(idx);
+
+      const elevOk =
+        anchorElevation === null || tt.elevation === anchorElevation;
+      const occupiedOrInvalid =
+        tt.terrain === 'WATER' ||
+        Boolean(tt.bridge) ||
+        Boolean(tt.industryId) ||
+        Boolean(tt.hqOwnerId) ||
+        Boolean(tt.depot) ||
+        Boolean(tt.stationId) ||
+        (tt.buildingTier ?? 0) > 0 ||
+        (tt.ownerId !== undefined &&
+          tt.ownerId !== null &&
+          tt.ownerId !== 'player') ||
+        (isRailStation && tt.road) ||
+        (!isRailStation && tt.rail);
+
+      if (!occupiedOrInvalid && !elevOk) {
+        hasSlopeMismatch = true;
+      }
+
+      footprintTiles.push({
+        x: pt.x,
+        y: pt.y,
+        valid: !occupiedOrInvalid && elevOk,
+      });
+    }
+
+    if (hasOutOfBounds) {
+      for (const ft of footprintTiles) {
+        ft.valid = false;
+      }
+    }
+
+    const catchmentTiles: Array<{ x: number; y: number }> = [];
+    if (footprintTiles.length > 0) {
+      let minX = footprintTiles[0].x;
+      let maxX = footprintTiles[0].x;
+      let minY = footprintTiles[0].y;
+      let maxY = footprintTiles[0].y;
+      for (const ft of footprintTiles) {
+        if (ft.x < minX) minX = ft.x;
+        if (ft.x > maxX) maxX = ft.x;
+        if (ft.y < minY) minY = ft.y;
+        if (ft.y > maxY) maxY = ft.y;
+      }
+
+      const startY = Math.max(0, minY - catchmentRadius);
+      const endY = Math.min(this.state.mapSize - 1, maxY + catchmentRadius);
+      const startX = Math.max(0, minX - catchmentRadius);
+      const endX = Math.min(this.state.mapSize - 1, maxX + catchmentRadius);
+
+      for (let cy = startY; cy <= endY; cy++) {
+        for (let cx = startX; cx <= endX; cx++) {
+          const cIdx = tileIndex(cx, cy, this.state.mapSize);
+          if (footprintIdxSet.has(cIdx)) continue;
+          const withinRadius = footprintTiles.some(
+            (ft) =>
+              Math.max(Math.abs(cx - ft.x), Math.abs(cy - ft.y)) <=
+              catchmentRadius
+          );
+          if (withinRadius) {
+            catchmentTiles.push({ x: cx, y: cy });
+          }
+        }
+      }
+    }
+
+    let suppliedCargos: CargoType[] = [];
+    let acceptedCargos: CargoType[] = [];
+    let townName: string | null = null;
+    let nearbyIndustries: string[] = [];
+
+    if (footprintTiles.length > 0) {
+      const virtualStation: Station = {
+        id: '__preview__',
+        name: 'Preview',
+        ownerId: 'player',
+        kind,
+        x: footprintTiles[0].x,
+        y: footprintTiles[0].y,
+        tiles: footprintTiles.map((ft) => ({ x: ft.x, y: ft.y })),
+        orientation: isRailStation ? orientation : undefined,
+        tracks: isRailStation ? tracks : 1,
+        platformLength: isRailStation ? platformLength : 1,
+        townId: null,
+        nearbyIndustryIds: [],
+        waitingCargo: createEmptyCargoRecord(),
+        ratings: createInitialRatingsRecord(),
+        daysSincePickup: 0,
+      };
+      refreshStationCatchment(this.state, virtualStation);
+      suppliedCargos = getStationSuppliedCargos(this.state, virtualStation);
+      acceptedCargos = getStationAcceptedCargosWithSources(
+        this.state,
+        virtualStation
+      ).map((item) => item.cargo);
+      if (virtualStation.townId) {
+        townName =
+          this.state.towns.find((t) => t.id === virtualStation.townId)?.name ??
+          null;
+      }
+      nearbyIndustries = virtualStation.nearbyIndustryIds
+        .map(
+          (indId) => this.state.industries.find((i) => i.id === indId)?.name
+        )
+        .filter((name): name is string => Boolean(name));
+    }
+
+    let ok = true;
+    let reason: string | undefined;
+    if (
+      !inBounds(rx, ry, this.state.mapSize) ||
+      hasOutOfBounds ||
+      footprintTiles.length !== totalTileCount
+    ) {
+      ok = false;
+      reason = 'Stasjonen går utenfor kartkanten.';
+    } else if (footprintTiles.some((ft) => !ft.valid)) {
+      ok = false;
+      reason = hasSlopeMismatch
+        ? 'Terrenget må være flatt under hele stasjonen.'
+        : 'Kan ikke plassere stasjon her — ruten er opptatt eller ulendt.';
+    } else if (this.state.corporate.cash < cost) {
+      ok = false;
+      reason = 'Ikke nok selskapskontanter til stasjon.';
+    }
+
+    return {
+      ok,
+      ...(reason ? { reason } : {}),
+      cost,
+      orientation,
+      tracks,
+      platformLength,
+      catchmentRadius,
+      footprintTiles,
+      catchmentTiles,
+      suppliedCargos,
+      acceptedCargos,
+      townName,
+      nearbyIndustries,
+    };
+  }
+
+  public getStationCatchmentTiles(
+    stationId: string
+  ): Array<{ x: number; y: number }> {
+    let station: Station | undefined = this.state.stations.find(
+      (s) => s.id === stationId
+    );
+    if (!station && this.state.remotePlayers) {
+      for (const peer of this.state.remotePlayers) {
+        const found = peer.stations.find((s) => s.id === stationId);
+        if (found) {
+          station = found;
+          break;
+        }
+      }
+    }
+    if (!station || !Array.isArray(station.tiles) || station.tiles.length === 0) {
+      return [];
+    }
+
+    const inBoundsFootprint = station.tiles.filter((pt) =>
+      inBounds(pt.x, pt.y, this.state.mapSize)
+    );
+    if (inBoundsFootprint.length === 0) return [];
+
+    const catchmentRadius = getStationCatchmentRadius(station.kind);
+    const footprintIdxSet = new Set<number>();
+    let minX = inBoundsFootprint[0].x;
+    let maxX = inBoundsFootprint[0].x;
+    let minY = inBoundsFootprint[0].y;
+    let maxY = inBoundsFootprint[0].y;
+
+    for (const pt of inBoundsFootprint) {
+      footprintIdxSet.add(tileIndex(pt.x, pt.y, this.state.mapSize));
+      if (pt.x < minX) minX = pt.x;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+
+    const startY = Math.max(0, minY - catchmentRadius);
+    const endY = Math.min(this.state.mapSize - 1, maxY + catchmentRadius);
+    const startX = Math.max(0, minX - catchmentRadius);
+    const endX = Math.min(this.state.mapSize - 1, maxX + catchmentRadius);
+
+    const catchmentTiles: Array<{ x: number; y: number }> = [];
+    for (let cy = startY; cy <= endY; cy++) {
+      for (let cx = startX; cx <= endX; cx++) {
+        const cIdx = tileIndex(cx, cy, this.state.mapSize);
+        if (footprintIdxSet.has(cIdx)) continue;
+        const withinRadius = inBoundsFootprint.some(
+          (ft) =>
+            Math.max(Math.abs(cx - ft.x), Math.abs(cy - ft.y)) <=
+            catchmentRadius
+        );
+        if (withinRadius) {
+          catchmentTiles.push({ x: cx, y: cy });
+        }
+      }
+    }
+
+    return catchmentTiles;
+  }
+
   public sellVehicle(
     vehicleId: string,
     options?: { keepWagonsInDepot?: boolean }
@@ -3797,7 +4302,10 @@ export class GameEngine {
         delta.be = t.bridgeElevation ?? 1;
       }
       if (t.depot) delta.depot = t.depot;
-      if (t.stationId) delta.stationId = t.stationId;
+      if (t.stationId) {
+        delta.stationId = t.stationId;
+        if (t.stationAxis) delta.sa = t.stationAxis;
+      }
       if (t.hqOwnerId === 'player') {
         delta.hqOwnerId = clientId;
         delta.hqOwnerTier = this.state.corporate.hqTier || 1;
@@ -3805,23 +4313,31 @@ export class GameEngine {
       modifiedTiles.push(delta);
     }
 
-    const stations: Station[] = this.state.stations
+    const stations: RemoteStationSnapshot[] = this.state.stations
       .filter((s) => s.ownerId === 'player')
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        ownerId: clientId,
-        kind: s.kind,
-        x: s.x,
-        y: s.y,
-        tiles: s.tiles.map((pt) => ({ x: pt.x, y: pt.y })),
-        townId: s.townId,
-        nearbyIndustryIds: [...s.nearbyIndustryIds],
-        waitingCargo: { ...s.waitingCargo },
-        ratings: { ...s.ratings },
-        daysSincePickup: s.daysSincePickup,
-        lastVehicleMaxSpeedKmh: s.lastVehicleMaxSpeedKmh ?? 88,
-      }));
+      .map((s) => {
+        const stSnap: RemoteStationSnapshot = {
+          id: s.id,
+          name: s.name,
+          ownerId: clientId,
+          kind: s.kind,
+          x: s.x,
+          y: s.y,
+          tiles: s.tiles.map((pt) => ({ x: pt.x, y: pt.y })),
+          townId: s.townId,
+          nearbyIndustryIds: [...s.nearbyIndustryIds],
+          waitingCargo: { ...s.waitingCargo },
+          ratings: { ...s.ratings },
+          daysSincePickup: s.daysSincePickup,
+          lastVehicleMaxSpeedKmh: s.lastVehicleMaxSpeedKmh ?? 88,
+        };
+        if (s.kind === 'TRAIN_STATION') {
+          stSnap.orientation = s.orientation ?? 'X';
+          stSnap.tracks = getEffectiveStationTracks(s);
+          stSnap.platformLength = getEffectiveStationPlatformLength(s);
+        }
+        return stSnap;
+      });
 
     const vehicles: RemoteVehicleSnapshot[] = this.state.vehicles
       .filter((v) => v.ownerId === 'player')
@@ -3866,6 +4382,7 @@ export class GameEngine {
           depotX: v.depotX ?? v.x,
           depotY: v.depotY ?? v.y,
           loadingTicksRemaining: v.loadingTicksRemaining ?? 0,
+          platformOverhangTiles: v.platformOverhangTiles ?? 0,
           waitForFullLoad: Boolean(v.waitForFullLoad),
           accelTicks: v.accelTicks ?? 0,
           fullLoadWaitTicks: v.fullLoadWaitTicks ?? 0,
@@ -3997,6 +4514,9 @@ export class GameEngine {
           if (mt.signal && tile.rail && !tile.road) tile.signal = true;
           if (mt.depot) tile.depot = mt.depot;
           if (mt.stationId) tile.stationId = mt.stationId;
+          if (mt.sa === 'X' || mt.sa === 'Y') {
+            tile.stationAxis = mt.sa;
+          }
           if (mt.hqOwnerId) {
             tile.hqOwnerId = peerId;
             tile.hqOwnerTier = mt.hqOwnerTier ?? (peer.hqTier || 1);
@@ -4031,14 +4551,38 @@ export class GameEngine {
           Array.isArray(rawSt.tiles) && rawSt.tiles.length > 0
             ? rawSt.tiles
             : [{ x: rawSt.x, y: rawSt.y }];
+        const stKind: StationKind = rawSt.kind || 'BUS_STOP';
+        const stOrient: 'X' | 'Y' | undefined =
+          stKind === 'TRAIN_STATION'
+            ? rawSt.orientation === 'Y'
+              ? 'Y'
+              : 'X'
+            : undefined;
         const normalizedStation: Station = {
           id: rawSt.id,
           name: rawSt.name || `${peer.companyName} Stasjon`,
           ownerId: peerId,
-          kind: rawSt.kind || 'BUS_STOP',
+          kind: stKind,
           x: rawSt.x,
           y: rawSt.y,
           tiles: stTiles,
+          ...(stKind === 'TRAIN_STATION'
+            ? {
+                orientation: stOrient,
+                tracks: getEffectiveStationTracks({
+                  kind: stKind,
+                  tiles: stTiles,
+                  orientation: stOrient,
+                  tracks: rawSt.tracks,
+                }),
+                platformLength: getEffectiveStationPlatformLength({
+                  kind: stKind,
+                  tiles: stTiles,
+                  orientation: stOrient,
+                  platformLength: rawSt.platformLength,
+                }),
+              }
+            : {}),
           townId: rawSt.townId ?? null,
           nearbyIndustryIds: Array.isArray(rawSt.nearbyIndustryIds)
             ? rawSt.nearbyIndustryIds
@@ -4054,6 +4598,16 @@ export class GameEngine {
           daysSincePickup: rawSt.daysSincePickup ?? 0,
           lastVehicleMaxSpeedKmh: rawSt.lastVehicleMaxSpeedKmh ?? 88,
         };
+        if (stKind === 'TRAIN_STATION' && stOrient) {
+          for (const pt of stTiles) {
+            if (!inBounds(pt.x, pt.y, this.state.mapSize)) continue;
+            const stTile =
+              this.state.tiles[tileIndex(pt.x, pt.y, this.state.mapSize)];
+            if (stTile.stationId === rawSt.id && !stTile.stationAxis) {
+              stTile.stationAxis = stOrient;
+            }
+          }
+        }
         this.state.stations.push(normalizedStation);
       }
 

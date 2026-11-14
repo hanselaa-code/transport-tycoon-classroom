@@ -10,21 +10,36 @@ import {
   Bus,
   Package,
   Waves,
+  Grid3x3,
+  RotateCw,
 } from 'lucide-react';
 import type { BridgeType, ToolType } from '../types/game';
-import { BRIDGE_CATALOG, BRIDGE_TYPES_ORDER, BUILD_COSTS } from '../core';
+import {
+  BRIDGE_CATALOG,
+  BRIDGE_TYPES_ORDER,
+  BUILD_COSTS,
+  MAX_STATION_LENGTH,
+  MAX_STATION_TRACKS,
+  MAX_TRAIN_WAGONS,
+  RAIL_STATION_CATCHMENT_RADIUS,
+  ROAD_STATION_CATCHMENT_RADIUS,
+} from '../core';
 import { formatKr } from './formatters';
 import { TTDWindow } from './TTDWindow';
 
 export interface ConstructionPaletteProps {
   mode: 'RAIL' | 'ROAD';
   activeTool: ToolType;
+  stationOrientation: 'X' | 'Y';
+  stationTracks: number;
   stationLength: number;
   selectedBridgeType: BridgeType;
   zIndex: number;
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onSelectTool: (tool: ToolType) => void;
+  onSetStationOrientation: (dir: 'X' | 'Y') => void;
+  onSetStationTracks: (tracks: number) => void;
   onSetStationLength: (len: number) => void;
   onSelectBridgeType: (bridgeType: BridgeType) => void;
 }
@@ -35,20 +50,40 @@ const SHORT_BRIDGE_LABELS_NO: Record<BridgeType, string> = {
   MODERN: '3. Moderne skråstagbru',
 };
 
+const TRACK_OPTIONS = Array.from(
+  { length: MAX_STATION_TRACKS },
+  (_, i) => i + 1
+);
+const LENGTH_OPTIONS = Array.from(
+  { length: MAX_STATION_LENGTH },
+  (_, i) => i + 1
+);
+
 export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
   mode,
   activeTool,
+  stationOrientation,
+  stationTracks,
   stationLength,
   selectedBridgeType,
   zIndex,
   onFocus,
   onClose,
   onSelectTool,
+  onSetStationOrientation,
+  onSetStationTracks,
   onSetStationLength,
   onSelectBridgeType,
 }) => {
   const windowId = mode === 'RAIL' ? 'rail_palette' : 'road_palette';
   const currentBridgeSpec = BRIDGE_CATALOG[selectedBridgeType];
+
+  const totalStationTiles = stationTracks * stationLength;
+  const totalStationCost = totalStationTiles * BUILD_COSTS.TRAIN_STATION;
+  const maxPenaltyFreeWagons = Math.min(
+    MAX_TRAIN_WAGONS,
+    stationLength * 2 - 1
+  );
 
   if (mode === 'RAIL') {
     return (
@@ -60,7 +95,7 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
         theme="teal"
         defaultX={14}
         defaultY={52}
-        width={350}
+        width={376}
         zIndex={zIndex}
         onFocus={onFocus}
         onClose={onClose}
@@ -141,9 +176,6 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
                   </button>
                 );
               })}
-              <div className="text-[10px] text-slate-300 px-0.5 leading-tight">
-                Dra rett over vann fra bredd til bredd — du får velge og bekrefte blant alle 3 brukvaliteter!
-              </div>
             </div>
           </div>
 
@@ -158,14 +190,15 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
           >
             <span className="flex items-center gap-2">
               <Warehouse className="w-4 h-4 text-amber-300" />
-              <span>Togdepot (Kjøp tog her)</span>
+              <span>Togdepot (Kjøp lok & vogner)</span>
             </span>
             <span className="text-amber-200 ttd-num">
               {formatKr(BUILD_COSTS.RAIL_DEPOT)}
             </span>
           </button>
 
-          <div className="ttd-panel p-1.5 space-y-1.5">
+          {/* Authentic OpenTTD Train Station Builder (Orientation + 1–4 Tracks + 1–6 Length + Catchment Grid) */}
+          <div className="ttd-panel p-2 space-y-2">
             <button
               type="button"
               onClick={() =>
@@ -180,19 +213,108 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
               <span className="flex items-center gap-2">
                 <Building className="w-4 h-4 text-emerald-300" />
                 <span>
-                  Togstasjon ({stationLength}{' '}
-                  {stationLength === 1 ? 'rute' : 'ruter'})
+                  Bygg Togstasjon ({stationTracks}×{stationLength})
                 </span>
               </span>
               <span className="text-amber-200 ttd-num">
-                {formatKr(BUILD_COSTS.TRAIN_STATION * stationLength)}
+                {formatKr(totalStationCost)}
               </span>
             </button>
 
-            <div className="flex items-center justify-between gap-1 text-[11px] px-0.5">
-              <span className="text-slate-300">Plattformlengde (1–3 ruter):</span>
-              <div className="flex items-center gap-1">
-                {[1, 2, 3].map((len) => (
+            {/* 1. Orientation (X vs Y) + [R] Shortcut */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="font-bold text-amber-200">
+                  Retning på spor:
+                </span>
+                <span className="text-slate-300 inline-flex items-center gap-1">
+                  <RotateCw className="w-2.5 h-2.5 text-amber-300" />
+                  <span>Hurtigtast [R]</span>
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSetStationOrientation('X');
+                    onSelectTool('TRAIN_STATION');
+                  }}
+                  className={`ttd-btn !py-1 !px-1.5 !text-[10px] ${
+                    stationOrientation === 'X' && activeTool === 'TRAIN_STATION'
+                      ? 'ttd-btn-active'
+                      : stationOrientation === 'X'
+                      ? 'ttd-btn-teal'
+                      : ''
+                  }`}
+                >
+                  <span className="font-black text-amber-300 text-xs">⟋</span>
+                  <span>Nordøst–Sørvest (X)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSetStationOrientation('Y');
+                    onSelectTool('TRAIN_STATION');
+                  }}
+                  className={`ttd-btn !py-1 !px-1.5 !text-[10px] ${
+                    stationOrientation === 'Y' && activeTool === 'TRAIN_STATION'
+                      ? 'ttd-btn-active'
+                      : stationOrientation === 'Y'
+                      ? 'ttd-btn-teal'
+                      : ''
+                  }`}
+                >
+                  <span className="font-black text-amber-300 text-xs">⟍</span>
+                  <span>Nordvest–Sørøst (Y)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 2. Number of Parallel Tracks (1–4) */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="font-bold text-amber-200">
+                  Antall spor (1–{MAX_STATION_TRACKS}):
+                </span>
+                <span className="text-slate-300 ttd-num">
+                  {stationTracks} {stationTracks === 1 ? 'spor' : 'parallelle spor'}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                {TRACK_OPTIONS.map((tr) => (
+                  <button
+                    key={tr}
+                    type="button"
+                    onClick={() => {
+                      onSetStationTracks(tr);
+                      onSelectTool('TRAIN_STATION');
+                    }}
+                    className={`ttd-btn !py-0.5 ttd-num ${
+                      stationTracks === tr && activeTool === 'TRAIN_STATION'
+                        ? 'ttd-btn-active'
+                        : stationTracks === tr
+                        ? 'ttd-btn-teal'
+                        : ''
+                    }`}
+                  >
+                    {tr}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 3. Platform Length (1–6) */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="font-bold text-amber-200">
+                  Plattformlengde (1–{MAX_STATION_LENGTH} ruter):
+                </span>
+                <span className="text-slate-300 ttd-num">
+                  {stationLength} {stationLength === 1 ? 'rute' : 'ruter'} lang
+                </span>
+              </div>
+              <div className="grid grid-cols-6 gap-1">
+                {LENGTH_OPTIONS.map((len) => (
                   <button
                     key={len}
                     type="button"
@@ -200,7 +322,7 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
                       onSetStationLength(len);
                       onSelectTool('TRAIN_STATION');
                     }}
-                    className={`ttd-btn !px-2 !py-0.5 ttd-num ${
+                    className={`ttd-btn !py-0.5 ttd-num ${
                       stationLength === len && activeTool === 'TRAIN_STATION'
                         ? 'ttd-btn-active'
                         : stationLength === len
@@ -211,6 +333,28 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
                     {len}
                   </button>
                 ))}
+              </div>
+            </div>
+
+            {/* Live OpenTTD Station Info Summary */}
+            <div className="ttd-inset p-1.5 space-y-1 text-[10px] ttd-num bg-slate-950/80">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300">Totalpris ({stationTracks}×{stationLength}):</span>
+                <strong className="text-amber-200">{formatKr(totalStationCost)}</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300">Kapasitet uten tidsstraff:</span>
+                <strong className="text-emerald-300">
+                  Opptil {maxPenaltyFreeWagons}{' '}
+                  {maxPenaltyFreeWagons === 1 ? 'vogn' : 'vogner'}
+                  {stationLength >= 5 ? ' (full lengde)' : ''}
+                </strong>
+              </div>
+              <div className="flex items-start gap-1 text-sky-300 pt-0.5 border-t border-slate-800/80 leading-snug">
+                <Grid3x3 className="w-3.5 h-3.5 shrink-0 mt-0.5 text-sky-400" />
+                <span>
+                  <strong>Nedslagsfelt:</strong> {RAIL_STATION_CATCHMENT_RADIUS} ruter rundt hele stasjonen — vises som blått grid på kartet! Lengre tog enn plattformen får tidsstraff ved av-/pålasting.
+                </span>
               </div>
             </div>
           </div>
@@ -251,12 +395,6 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
             </span>
           </button>
         </div>
-
-        <div className="ttd-inset p-2 text-[11px] text-slate-300 leading-snug">
-          <strong className="text-amber-300">Tips:</strong> Legg togstasjoner
-          innenfor <span className="text-emerald-300 font-semibold">4 ruter</span>{' '}
-          fra by eller industri for å fange opp passasjerer og varer!
-        </div>
       </TTDWindow>
     );
   }
@@ -270,7 +408,7 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
       theme="teal"
       defaultX={14}
       defaultY={52}
-      width={350}
+      width={360}
       zIndex={zIndex}
       onFocus={onFocus}
       onClose={onClose}
@@ -351,9 +489,6 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
                 </button>
               );
             })}
-            <div className="text-[10px] text-slate-300 px-0.5 leading-tight">
-              Dra rett over vann fra bredd til bredd — du får velge og bekrefte blant alle 3 brukvaliteter!
-            </div>
           </div>
         </div>
 
@@ -410,6 +545,17 @@ export const ConstructionPalette: React.FC<ConstructionPaletteProps> = ({
             {formatKr(BUILD_COSTS.TRUCK_BAY)}
           </span>
         </button>
+
+        {(activeTool === 'BUS_STOP' || activeTool === 'TRUCK_BAY') && (
+          <div className="ttd-inset p-2 bg-sky-950/40 border border-sky-500/60 text-[10px] text-sky-200 flex items-start gap-1.5 leading-snug">
+            <Grid3x3 className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>{ROAD_STATION_CATCHMENT_RADIUS}-ruters nedslagsfelt-grid</strong>{' '}
+              vises live i blått på kartet slik at du ser nøyaktig hvilke hus og
+              industrier holdeplassen/terminalen dekker!
+            </span>
+          </div>
+        )}
 
         <button
           type="button"

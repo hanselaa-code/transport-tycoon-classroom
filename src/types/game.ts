@@ -95,6 +95,7 @@ export interface Tile {
   bridgeElevation?: number;
   depot?: 'ROAD' | 'RAIL' | null;
   stationId?: string | null;
+  stationAxis?: 'X' | 'Y';
   townId?: string | null;
   industryId?: string | null;
   hqOwnerId?: string | null;
@@ -142,6 +143,9 @@ export interface Station {
   x: number;
   y: number;
   tiles: Array<{ x: number; y: number }>;
+  orientation?: 'X' | 'Y';
+  tracks?: number;
+  platformLength?: number;
   townId: string | null;
   nearbyIndustryIds: string[];
   waitingCargo: Record<CargoType, number>;
@@ -236,6 +240,7 @@ export interface Vehicle {
   depotX?: number;
   depotY?: number;
   loadingTicksRemaining?: number;
+  platformOverhangTiles?: number;
   waitForFullLoad?: boolean;
   accelTicks?: number;
   fullLoadWaitTicks?: number;
@@ -427,6 +432,22 @@ export interface StationDetailsInfo {
   hqBonusPct: number;
 }
 
+export interface StationPlacementPreview {
+  ok: boolean;
+  reason?: string;
+  cost: number;
+  orientation: 'X' | 'Y';
+  tracks: number;
+  platformLength: number;
+  catchmentRadius: number;
+  footprintTiles: Array<{ x: number; y: number; valid: boolean }>;
+  catchmentTiles: Array<{ x: number; y: number }>;
+  suppliedCargos: CargoType[];
+  acceptedCargos: CargoType[];
+  townName: string | null;
+  nearbyIndustries: string[];
+}
+
 export interface ModifiedTileDelta {
   x: number;
   y: number;
@@ -439,9 +460,12 @@ export interface ModifiedTileDelta {
   be?: number;
   depot?: 'ROAD' | 'RAIL' | null;
   stationId?: string | null;
+  sa?: 'X' | 'Y';
   hqOwnerId?: string | null;
   hqOwnerTier?: number;
 }
+
+export interface RemoteStationSnapshot extends Station {}
 
 export interface RemoteVehicleSnapshot extends Vehicle {
   wt?: CargoType[];
@@ -458,7 +482,7 @@ export interface RemotePlayerWorldSlice {
   hqTile: { x: number; y: number } | null;
   hqTier: number;
   modifiedTiles: ModifiedTileDelta[];
-  stations: Station[];
+  stations: RemoteStationSnapshot[];
   vehicles: RemoteVehicleSnapshot[];
   updatedAt?: number;
 }

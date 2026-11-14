@@ -2,10 +2,13 @@ import * as THREE from 'three';
 import type { CargoType, GameState, Vehicle, VehicleModelId } from '../types/game';
 import {
   getSurfaceHeightAt,
+  getTileAt,
   getTravelSurfaceHeightAt,
   resolveOwnerColor,
 } from './IsoSceneManager';
 import { VehicleTexturesManager, shadeHex } from './VehicleTextures';
+
+const TRAIN_STATION_STOP_OFFSET = 0.2;
 
 function sampleVehicleTravelHeight(
   state: GameState,
@@ -15,6 +18,22 @@ function sampleVehicleTravelHeight(
   return typeof getTravelSurfaceHeightAt === 'function'
     ? getTravelSurfaceHeightAt(state, worldX, worldZ)
     : getSurfaceHeightAt(state, worldX, worldZ);
+}
+
+function isTrainStationTile(state: GameState, gx: number, gy: number): boolean {
+  const tile = getTileAt(state, Math.round(gx), Math.round(gy));
+  if (!tile || !tile.stationId) return false;
+  if (Array.isArray(state.stations)) {
+    const localSt = state.stations.find((s) => s.id === tile.stationId);
+    if (localSt) return localSt.kind === 'TRAIN_STATION';
+  }
+  if (Array.isArray(state.remotePlayers)) {
+    for (const rp of state.remotePlayers) {
+      const remSt = rp.stations.find((s) => s.id === tile.stationId);
+      if (remSt) return remSt.kind === 'TRAIN_STATION';
+    }
+  }
+  return Boolean(tile.rail);
 }
 
 interface Breadcrumb {
@@ -97,6 +116,8 @@ interface VehicleVisualInstance {
   currentYaw: number;
   currentPitch: number;
   currentRoll: number;
+  stopOffsetX: number;
+  stopOffsetZ: number;
 
   breadcrumbs: Breadcrumb[];
 }
@@ -743,12 +764,36 @@ export class VehicleRenderer {
         );
       }
 
-      // Subtle right-hand lane offset on roads
+      // Subtle right-hand lane offset on roads, and OpenTTD front-buffer pull-in at train stations
       if (v.network === 'ROAD') {
         const rightX = Math.cos(inst.currentYaw);
         const rightZ = -Math.sin(inst.currentYaw);
         wx += rightX * 0.1;
         wz += rightZ * 0.1;
+      } else if (v.network === 'RAIL') {
+        let targetPullMag = 0;
+        if (v.state === 'LOADING') {
+          targetPullMag = TRAIN_STATION_STOP_OFFSET;
+        } else if (v.state === 'MOVING' && !v.goingToDepot) {
+          if (v.nextX === v.x && v.nextY === v.y && isTrainStationTile(state, v.x, v.y)) {
+            targetPullMag = TRAIN_STATION_STOP_OFFSET;
+          } else if (
+            (v.nextX !== v.x || v.nextY !== v.y) &&
+            (!v.path || v.path.length <= 1) &&
+            isTrainStationTile(state, v.nextX, v.nextY)
+          ) {
+            targetPullMag =
+              THREE.MathUtils.clamp((t - 0.35) / 0.65, 0, 1) *
+              (TRAIN_STATION_STOP_OFFSET * 0.8);
+          }
+        }
+        const targetOffX = Math.sin(inst.currentYaw) * targetPullMag;
+        const targetOffZ = Math.cos(inst.currentYaw) * targetPullMag;
+        const pullLerp = 1 - Math.exp((targetPullMag > 0 ? -10 : -6) * dt);
+        inst.stopOffsetX = THREE.MathUtils.lerp(inst.stopOffsetX, targetOffX, pullLerp);
+        inst.stopOffsetZ = THREE.MathUtils.lerp(inst.stopOffsetZ, targetOffZ, pullLerp);
+        wx += inst.stopOffsetX;
+        wz += inst.stopOffsetZ;
       }
 
       const wy = this.apply3DSurfacePose(
@@ -900,14 +945,29 @@ export class VehicleRenderer {
     statusBeacon.visible = false;
     rootGroup.add(statusBeacon);
 
-    const initYaw =
-      v.nextX !== v.x || v.nextY !== v.y
-        ? Math.atan2(v.nextX - v.x, v.nextY - v.y)
-        : (v.direction || 0) * (Math.PI / 2);
+    let initYaw = 0;
+    if (v.nextX !== v.x || v.nextY !== v.y) {
+      initYaw = Math.atan2(v.nextX - v.x, v.nextY - v.y);
+    } else if (
+      v.trail &&
+      v.trail.length > 0 &&
+      (v.trail[0].x !== v.x || v.trail[0].y !== v.y)
+    ) {
+      initYaw = Math.atan2(v.x - v.trail[0].x, v.y - v.trail[0].y);
+    } else if (typeof v.direction === 'number') {
+      initYaw = Math.atan2(Math.cos(v.direction), Math.sin(v.direction));
+    }
 
-    const breadcrumbs: Breadcrumb[] = [{ x: v.x, z: v.y }];
+    const initPullMag =
+      v.network === 'RAIL' && v.state === 'LOADING' ? TRAIN_STATION_STOP_OFFSET : 0;
+    const initStopOffsetX = Math.sin(initYaw) * initPullMag;
+    const initStopOffsetZ = Math.cos(initYaw) * initPullMag;
+
+    const breadcrumbs: Breadcrumb[] = [
+      { x: v.x + initStopOffsetX, z: v.y + initStopOffsetZ },
+    ];
     if (v.trail && v.trail.length > 0) {
-      for (let tIdx = v.trail.length - 1; tIdx >= 0; tIdx--) {
+      for (let tIdx = 0; tIdx < v.trail.length; tIdx++) {
         breadcrumbs.push({ x: v.trail[tIdx].x, z: v.trail[tIdx].y });
       }
     }
@@ -948,6 +1008,8 @@ export class VehicleRenderer {
       currentYaw: initYaw,
       currentPitch: 0,
       currentRoll: 0,
+      stopOffsetX: initStopOffsetX,
+      stopOffsetZ: initStopOffsetZ,
       breadcrumbs,
     };
   }

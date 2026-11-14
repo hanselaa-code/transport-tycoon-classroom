@@ -1,11 +1,19 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { BUILD_COSTS, type GameEngine } from '../core';
-import type { BridgeType, GameState, Tile, ToolType } from '../types/game';
+import {
+  BUILD_COSTS,
+  CARGO_LABELS_NO,
+  RAIL_STATION_CATCHMENT_RADIUS,
+  ROAD_STATION_CATCHMENT_RADIUS,
+  type ApplyToolOptions,
+  type GameEngine,
+} from '../core';
+import type { BridgeType, CargoType, GameState, Station, Tile, ToolType } from '../types/game';
 import { FloatingPopups } from './FloatingPopups';
 import {
   IsoSceneManager,
   type PickedTileResult,
+  type StationOverlayData,
   formatNorwegianInt,
   getTileAt,
   setOwnerColorStateContext,
@@ -29,6 +37,13 @@ export interface IsometricViewportProps {
     network: 'ROAD' | 'RAIL';
     bridgeTileCount: number;
   }) => void;
+  stationBuildConfig?: {
+    orientation: 'X' | 'Y';
+    tracks: number;
+    length: number;
+  };
+  onRotateStationOrientation?: () => void;
+  inspectedStationId?: string | null;
   zoomCommand?: { type: 'IN' | 'OUT'; seq: number } | null;
   focusTile?: { x: number; y: number; seq: number } | null;
   selectedStationOrderPicker?: ((stationId: string) => void) | null;
@@ -55,6 +70,23 @@ const TOOL_LABELS_NO: Record<ToolType, string> = {
 };
 
 type DragBuildTool = 'ROAD' | 'RAIL' | 'ROAD_BRIDGE' | 'RAIL_BRIDGE';
+type StationBuildTool = 'TRAIN_STATION' | 'BUS_STOP' | 'TRUCK_BAY';
+
+interface StationPreviewSummary {
+  ok: boolean;
+  reason?: string;
+  cost: number;
+  orientation: 'X' | 'Y';
+  tracks: number;
+  platformLength: number;
+  catchmentRadius: number;
+  footprintTiles: Array<{ x: number; y: number; valid: boolean }>;
+  catchmentTiles: Array<{ x: number; y: number }>;
+  suppliedCargos: CargoType[];
+  acceptedCargos: CargoType[];
+  townName?: string | null;
+  nearbyIndustries?: string[];
+}
 
 function isDragBuildTool(tool: ToolType): tool is DragBuildTool {
   return (
@@ -63,6 +95,173 @@ function isDragBuildTool(tool: ToolType): tool is DragBuildTool {
     tool === 'ROAD_BRIDGE' ||
     tool === 'RAIL_BRIDGE'
   );
+}
+
+function isStationBuildTool(tool: ToolType): tool is StationBuildTool {
+  return tool === 'TRAIN_STATION' || tool === 'BUS_STOP' || tool === 'TRUCK_BAY';
+}
+
+function computeStationPreviewWithFallback(
+  engine: GameEngine,
+  state: GameState,
+  hx: number,
+  hy: number,
+  tool: StationBuildTool,
+  cfg?: { orientation: 'X' | 'Y'; tracks: number; length: number }
+): StationPreviewSummary {
+  const orientation: 'X' | 'Y' =
+    tool === 'TRAIN_STATION' ? (cfg?.orientation === 'Y' ? 'Y' : 'X') : 'X';
+  const tracks =
+    tool === 'TRAIN_STATION'
+      ? Math.max(1, Math.min(4, Math.round(cfg?.tracks ?? 1)))
+      : 1;
+  const platformLength =
+    tool === 'TRAIN_STATION'
+      ? Math.max(1, Math.min(6, Math.round(cfg?.length ?? 3)))
+      : 1;
+
+  const engineWithPreview = engine as unknown as {
+    previewStationPlacement?: (
+      x: number,
+      y: number,
+      kind: StationBuildTool,
+      options?: {
+        orientation?: 'X' | 'Y';
+        stationTracks?: number;
+        stationLength?: number;
+      }
+    ) => StationPreviewSummary;
+  };
+
+  if (typeof engineWithPreview.previewStationPlacement === 'function') {
+    return engineWithPreview.previewStationPlacement(
+      hx,
+      hy,
+      tool,
+      tool === 'TRAIN_STATION'
+        ? {
+            orientation,
+            stationTracks: tracks,
+            stationLength: platformLength,
+          }
+        : undefined
+    );
+  }
+
+  // Fallback preview calculation matching engine rules
+  const spanX = orientation === 'X' ? platformLength : tracks;
+  const spanY = orientation === 'X' ? tracks : platformLength;
+  const catchmentRadius =
+    tool === 'TRAIN_STATION'
+      ? RAIL_STATION_CATCHMENT_RADIUS ?? 4
+      : ROAD_STATION_CATCHMENT_RADIUS ?? 3;
+
+  const footprintTiles: Array<{ x: number; y: number; valid: boolean }> = [];
+  const fpSet = new Set<number>();
+  const baseTile = getTileAt(state, hx, hy);
+  const refElev = baseTile?.elevation ?? 1;
+  let allValid = true;
+  let invalidReason: string | undefined;
+
+  for (let dy = 0; dy < spanY; dy++) {
+    for (let dx = 0; dx < spanX; dx++) {
+      const tx = hx + dx;
+      const ty = hy + dy;
+      const t = getTileAt(state, tx, ty);
+      let valid = true;
+      if (!t) {
+        valid = false;
+        invalidReason = invalidReason ?? 'Utenfor kartet.';
+      } else if (
+        t.terrain === 'WATER' ||
+        t.industryId ||
+        t.hqOwnerId ||
+        t.depot ||
+        t.stationId ||
+        (t.buildingTier ?? 0) > 0 ||
+        (tool === 'TRAIN_STATION' && t.road) ||
+        (tool !== 'TRAIN_STATION' && t.rail) ||
+        t.elevation !== refElev
+      ) {
+        valid = false;
+        invalidReason =
+          invalidReason ??
+          (t.elevation !== refElev
+            ? 'Alle ruter for stasjonen må ha lik høyde.'
+            : 'Ruten er opptatt eller ulendt.');
+      }
+      if (!valid) allValid = false;
+      footprintTiles.push({ x: tx, y: ty, valid });
+      if (tx >= 0 && ty >= 0 && tx < state.mapSize && ty < state.mapSize) {
+        fpSet.add(ty * state.mapSize + tx);
+      }
+    }
+  }
+
+  const minX = hx - catchmentRadius;
+  const maxX = hx + spanX - 1 + catchmentRadius;
+  const minY = hy - catchmentRadius;
+  const maxY = hy + spanY - 1 + catchmentRadius;
+
+  const catchmentTiles: Array<{ x: number; y: number }> = [];
+  const suppliedSet = new Set<CargoType>();
+  const acceptedSet = new Set<CargoType>();
+
+  for (let cy = Math.max(0, minY); cy <= Math.min(state.mapSize - 1, maxY); cy++) {
+    for (let cx = Math.max(0, minX); cx <= Math.min(state.mapSize - 1, maxX); cx++) {
+      const idx = cy * state.mapSize + cx;
+      const qt = state.tiles[idx];
+      if (!fpSet.has(idx)) {
+        catchmentTiles.push({ x: cx, y: cy });
+      }
+      if (qt) {
+        if ((qt.buildingTier ?? 0) >= 1) {
+          suppliedSet.add('PASSENGERS');
+          suppliedSet.add('MAIL');
+          acceptedSet.add('PASSENGERS');
+          acceptedSet.add('MAIL');
+          if ((qt.buildingTier ?? 0) >= 2) {
+            acceptedSet.add('GOODS');
+            acceptedSet.add('FOOD');
+          }
+        }
+        if (qt.industryId) {
+          const ind = state.industries.find((item) => item.id === qt.industryId);
+          if (ind) {
+            if (ind.produces) suppliedSet.add(ind.produces);
+            for (const acc of ind.accepts) acceptedSet.add(acc);
+          }
+        }
+      }
+    }
+  }
+
+  const unitCost = BUILD_COSTS?.[tool] ?? 45000;
+  return {
+    ok: allValid,
+    reason: allValid ? undefined : invalidReason,
+    cost: unitCost * tracks * platformLength,
+    orientation,
+    tracks,
+    platformLength,
+    catchmentRadius,
+    footprintTiles,
+    catchmentTiles,
+    suppliedCargos: Array.from(suppliedSet),
+    acceptedCargos: Array.from(acceptedSet),
+  };
+}
+
+function findAnyStationById(state: GameState, stationId: string): Station | undefined {
+  const local = state.stations.find((s) => s.id === stationId);
+  if (local) return local;
+  if (state.remotePlayers) {
+    for (let i = 0; i < state.remotePlayers.length; i++) {
+      const found = state.remotePlayers[i].stations.find((s) => s.id === stationId);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 function computeFallbackDragTiles(
@@ -112,6 +311,9 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
   mapRotation,
   selectedBridgeType,
   onRequestBridgeChoice,
+  stationBuildConfig,
+  onRotateStationOrientation,
+  inspectedStationId,
   zoomCommand,
   focusTile,
   selectedStationOrderPicker,
@@ -123,6 +325,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const cursorHudRef = useRef<HTMLDivElement | null>(null);
+  const refreshHudFnRef = useRef<(() => void) | null>(null);
 
   // Latest props ref so the 60 FPS WebGL loop never re-mounts on React state updates
   const propsRef = useRef({
@@ -132,6 +335,9 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     mapRotation,
     selectedBridgeType,
     onRequestBridgeChoice,
+    stationBuildConfig,
+    onRotateStationOrientation,
+    inspectedStationId,
     selectedStationOrderPicker,
     onTileInteract,
     onDepotClick,
@@ -145,6 +351,9 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     mapRotation,
     selectedBridgeType,
     onRequestBridgeChoice,
+    stationBuildConfig,
+    onRotateStationOrientation,
+    inspectedStationId,
     selectedStationOrderPicker,
     onTileInteract,
     onDepotClick,
@@ -155,6 +364,16 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
   const sceneMgrRef = useRef<IsoSceneManager | null>(null);
   const lastZoomSeqRef = useRef<number | null>(null);
   const lastFocusSeqRef = useRef<number | null>(null);
+
+  // Refresh station build tooltip immediately when orientation/tracks/length or activeTool changes
+  useEffect(() => {
+    refreshHudFnRef.current?.();
+  }, [
+    activeTool,
+    stationBuildConfig?.orientation,
+    stationBuildConfig?.tracks,
+    stationBuildConfig?.length,
+  ]);
 
   // Sync mapRotation prop changes
   useEffect(() => {
@@ -230,6 +449,37 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     let buildDragPreviewCost = 0;
     let buildDragBridgeTiles = 0;
 
+    const setHudLines = (
+      lines: Array<{ text: string; color?: string; fontWeight?: number }>
+    ): void => {
+      const hud = cursorHudRef.current;
+      if (!hud) return;
+      while (hud.firstChild) {
+        hud.removeChild(hud.firstChild);
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const row = document.createElement('div');
+        row.textContent = lines[i].text;
+        row.style.color = lines[i].color ?? '#fde047';
+        row.style.fontWeight = String(lines[i].fontWeight ?? (i === 0 ? 700 : 600));
+        row.style.lineHeight = '1.35';
+        hud.appendChild(row);
+      }
+    };
+
+    const positionHudNearCursor = (relX: number, relY: number): void => {
+      const hud = cursorHudRef.current;
+      if (!hud) return;
+      hud.style.display = 'block';
+      const w = hud.offsetWidth || 220;
+      const h = hud.offsetHeight || 28;
+      const vw = container.clientWidth || 800;
+      const vh = container.clientHeight || 600;
+      const clampedX = Math.max(8, Math.min(relX + 16, vw - w - 10));
+      const clampedY = Math.max(8, Math.min(relY + 16, vh - h - 10));
+      hud.style.transform = `translate3d(${clampedX.toFixed(0)}px, ${clampedY.toFixed(0)}px, 0)`;
+    };
+
     const updateCursorHud = (clientX: number, clientY: number): void => {
       const hud = cursorHudRef.current;
       if (!hud) return;
@@ -244,10 +494,55 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         return;
       }
 
+      if (!cur.selectedStationOrderPicker && isStationBuildTool(cur.activeTool)) {
+        const preview = computeStationPreviewWithFallback(
+          cur.engine,
+          cur.state,
+          hoverTile.x,
+          hoverTile.y,
+          cur.activeTool,
+          cur.stationBuildConfig
+        );
+        const formatCargos = (list: CargoType[]): string =>
+          list.length > 0
+            ? list.map((c) => CARGO_LABELS_NO?.[c] ?? c).join(', ')
+            : 'Ingen';
+
+        const headerText =
+          cur.activeTool === 'TRAIN_STATION'
+            ? `Togstasjon (${preview.tracks} spor × ${preview.platformLength} ruter • ${
+                preview.orientation === 'X' ? 'NØ–SV' : 'NV–SØ'
+              }) — ${formatNorwegianInt(preview.cost)} kr`
+            : `${TOOL_LABELS_NO[cur.activeTool]} (1×1) — ${formatNorwegianInt(
+                preview.cost
+              )} kr`;
+
+        const footerText =
+          !preview.ok && preview.reason
+            ? `⚠️ ${preview.reason}${
+                cur.activeTool === 'TRAIN_STATION' ? ' • [R] Roter retning' : ''
+              }`
+            : cur.activeTool === 'TRAIN_STATION'
+            ? `Nedslagsfelt: ${preview.catchmentRadius} ruter (blått grid) • [R] Roter retning`
+            : `Nedslagsfelt: ${preview.catchmentRadius} ruter (blått grid)`;
+
+        setHudLines([
+          { text: headerText, color: preview.ok ? '#fde047' : '#fca5a5', fontWeight: 700 },
+          { text: `Leverer: ${formatCargos(preview.suppliedCargos)}`, color: '#86efac' },
+          { text: `Tar imot: ${formatCargos(preview.acceptedCargos)}`, color: '#93c5fd' },
+          {
+            text: footerText,
+            color: !preview.ok && preview.reason ? '#fca5a5' : '#cbd5e1',
+          },
+        ]);
+        positionHudNearCursor(relX, relY);
+        return;
+      }
+
       let label = '';
       if (cur.selectedStationOrderPicker) {
         if (hoverTile.tile.stationId) {
-          const st = cur.state.stations.find((s) => s.id === hoverTile?.tile.stationId);
+          const st = findAnyStationById(cur.state, hoverTile.tile.stationId);
           label = `Legg til i rute: ${st?.name ?? 'Stasjon'}`;
         } else {
           label = 'Klikk på en stasjon på kartet';
@@ -289,11 +584,14 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
         return;
       }
 
-      hud.textContent = label;
-      hud.style.display = 'block';
-      hud.style.transform = `translate3d(${(relX + 16).toFixed(0)}px, ${(relY + 16).toFixed(
-        0
-      )}px, 0)`;
+      setHudLines([{ text: label, color: '#fde047', fontWeight: 700 }]);
+      positionHudNearCursor(relX, relY);
+    };
+
+    refreshHudFnRef.current = () => {
+      if (hoverTile && (lastClientX !== 0 || lastClientY !== 0)) {
+        updateCursorHud(lastClientX, lastClientY);
+      }
     };
 
     const recomputeDragPreview = (): void => {
@@ -576,10 +874,19 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
           return;
         }
 
-        // 3. Single-tile build / bulldoze / HQ placement tools
+        // 3. Single-tile / Multi-tile Station build / bulldoze / HQ placement tools
         if (picked) {
           const { x, y } = picked;
-          const res = cur.engine.applyTool(x, y, cur.activeTool);
+          const stCfg = cur.stationBuildConfig;
+          const toolOptions: (ApplyToolOptions & { stationTracks?: number }) | undefined =
+            cur.activeTool === 'TRAIN_STATION'
+              ? {
+                  orientation: stCfg?.orientation === 'Y' ? 'Y' : 'X',
+                  stationTracks: Math.max(1, Math.min(4, Math.round(stCfg?.tracks ?? 1))),
+                  stationLength: Math.max(1, Math.min(6, Math.round(stCfg?.length ?? 3))),
+                }
+              : undefined;
+          const res = cur.engine.applyTool(x, y, cur.activeTool, toolOptions);
           const freshState = cur.engine.getState();
 
           if (!res.ok && res.message) {
@@ -590,6 +897,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
               cur.onTileInteract?.(x, y, freshTile);
             }
           }
+          updateCursorHud(ev.clientX, ev.clientY);
         }
       }
 
@@ -616,6 +924,18 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
 
     const onKeyDown = (ev: KeyboardEvent): void => {
       if (isEditableElement(ev.target)) return;
+      if (
+        !ev.repeat &&
+        !ev.ctrlKey &&
+        !ev.metaKey &&
+        !ev.altKey &&
+        (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') &&
+        propsRef.current.activeTool === 'TRAIN_STATION'
+      ) {
+        ev.preventDefault();
+        propsRef.current.onRotateStationOrientation?.();
+        return;
+      }
       sceneMgr.setKeyState(ev.code, true);
       if (ev.code === 'Equal' || ev.code === 'NumpadAdd') {
         sceneMgr.applyZoomCommand('IN');
@@ -674,6 +994,108 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       }
     };
 
+    // Cached station placement / inspection overlay so idle frames allocate zero arrays
+    let lastOverlayCacheKey = '';
+    let cachedStationOverlay: StationOverlayData | null = null;
+
+    const resolveStationOverlay = (curState: GameState): StationOverlayData | null => {
+      const cur = propsRef.current;
+
+      // Mode A: Building a station (`TRAIN_STATION` / `BUS_STOP` / `TRUCK_BAY`) while hovering map
+      if (hoverTile && !cur.selectedStationOrderPicker && isStationBuildTool(cur.activeTool)) {
+        const cfg = cur.stationBuildConfig;
+        const key = `build:${hoverTile.x}:${hoverTile.y}:${cur.activeTool}:${
+          cfg?.orientation ?? 'X'
+        }:${cfg?.tracks ?? 1}:${cfg?.length ?? 3}:${curState.networkRevision ?? 0}:${
+          curState.stations.length
+        }`;
+        if (key !== lastOverlayCacheKey) {
+          const preview = computeStationPreviewWithFallback(
+            cur.engine,
+            curState,
+            hoverTile.x,
+            hoverTile.y,
+            cur.activeTool,
+            cfg
+          );
+          cachedStationOverlay = {
+            mode: 'BUILD_PREVIEW',
+            footprintTiles: preview.footprintTiles,
+            catchmentTiles: preview.catchmentTiles,
+          };
+          lastOverlayCacheKey = key;
+        }
+        return cachedStationOverlay;
+      }
+
+      // Mode B: Inspecting an existing station (`inspectedStationId` non-null)
+      if (cur.inspectedStationId) {
+        const st = findAnyStationById(curState, cur.inspectedStationId);
+        if (!st || st.tiles.length === 0) {
+          lastOverlayCacheKey = '';
+          cachedStationOverlay = null;
+          return null;
+        }
+        const key = `inspect:${st.id}:${st.tiles.length}:${curState.networkRevision ?? 0}:${
+          curState.mapSize
+        }`;
+        if (key !== lastOverlayCacheKey) {
+          const engineWithCatchment = cur.engine as unknown as {
+            getStationCatchmentTiles?: (id: string) => Array<{ x: number; y: number }>;
+          };
+          let catchmentTiles: Array<{ x: number; y: number }>;
+          if (typeof engineWithCatchment.getStationCatchmentTiles === 'function') {
+            catchmentTiles = engineWithCatchment.getStationCatchmentTiles(st.id);
+          } else {
+            const radius =
+              st.kind === 'TRAIN_STATION'
+                ? RAIL_STATION_CATCHMENT_RADIUS ?? 4
+                : ROAD_STATION_CATCHMENT_RADIUS ?? 3;
+            let minX = st.tiles[0].x;
+            let maxX = st.tiles[0].x;
+            let minY = st.tiles[0].y;
+            let maxY = st.tiles[0].y;
+            const fpSet = new Set<number>();
+            for (let i = 0; i < st.tiles.length; i++) {
+              const pt = st.tiles[i];
+              if (pt.x < minX) minX = pt.x;
+              if (pt.x > maxX) maxX = pt.x;
+              if (pt.y < minY) minY = pt.y;
+              if (pt.y > maxY) maxY = pt.y;
+              fpSet.add(pt.y * curState.mapSize + pt.x);
+            }
+            catchmentTiles = [];
+            for (
+              let cy = Math.max(0, minY - radius);
+              cy <= Math.min(curState.mapSize - 1, maxY + radius);
+              cy++
+            ) {
+              for (
+                let cx = Math.max(0, minX - radius);
+                cx <= Math.min(curState.mapSize - 1, maxX + radius);
+                cx++
+              ) {
+                if (!fpSet.has(cy * curState.mapSize + cx)) {
+                  catchmentTiles.push({ x: cx, y: cy });
+                }
+              }
+            }
+          }
+          cachedStationOverlay = {
+            mode: 'INSPECT_EXISTING',
+            footprintTiles: st.tiles.map((pt) => ({ x: pt.x, y: pt.y, valid: true })),
+            catchmentTiles,
+          };
+          lastOverlayCacheKey = key;
+        }
+        return cachedStationOverlay;
+      }
+
+      lastOverlayCacheKey = '';
+      cachedStationOverlay = null;
+      return null;
+    };
+
     // 60 FPS Render Loop
     let rafId = 0;
     let prevPerfMs = performance.now();
@@ -707,13 +1129,15 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
       syncGroupShadows(structuresRenderer.group);
       syncGroupShadows(vehicleRenderer.group);
 
+      const stationOverlay = resolveStationOverlay(latestState);
       sceneMgr.updateHoverAndDragPreview(
         hoverTile,
         buildDragPreviewTiles,
         cur.activeTool,
         Boolean(cur.selectedStationOrderPicker),
         latestState,
-        timeSec
+        timeSec,
+        stationOverlay
       );
 
       sceneMgr.render();
@@ -729,6 +1153,7 @@ export const IsometricViewport: React.FC<IsometricViewportProps> = ({
     return () => {
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
+      refreshHudFnRef.current = null;
 
       dom.removeEventListener('contextmenu', onContextMenu);
       dom.removeEventListener('wheel', onWheel);
